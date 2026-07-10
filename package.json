@@ -1,0 +1,33 @@
+{
+  "name": "@andrewpopov/fetch-client-kit",
+  "version": "0.1.0",
+  "description": "Framework-agnostic browser fetch client: a single-flight 401 -> refresh -> retry transport with pluggable auth (cookie / bearer / csrf).",
+  "author": "Andrew Popov",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:pack": "node scripts/verify-pack.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

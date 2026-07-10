@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  # Single job named `test` so it stays the stable required status check for
+  # branch protection. Runs the engines floor (Node 20). The Node 22 compat
+  # matrix lives in a SEPARATE `compat` job (below) so this required context
+  # name never changes — a matrix would rename `test` to `test (20)` and
+  # silently break a required context of `test`.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run verify:pack
+      - name: Dist freshness (committed dist/ must match src/)
+        run: |
+          npm run build
+          git diff --exit-code dist
+
+  # Non-required forward-compat leg. Kept out of the `test` context name on
+  # purpose (see above). Promote `ci-success` to the required check (and drop
+  # `test`) if/when you want the matrix gating merges.
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run verify:pack
+
+  # Non-required: real Redis integration test for RedisRateLimitStore. Runs
+  # ONLY here (never in `test`/`compat`) since it needs a live Redis. Sets
+  # ESK_REDIS_URL so redis-store.integration.test.ts un-skips itself.
+  redis-integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Real-Redis integration test
+        env:
+          ESK_REDIS_URL: redis://localhost:6379
+        run: npx vitest run redis-store.integration
+
+  # Aggregation gate: green only if `test` and `compat` passed. Make THIS the
+  # required status check to gate merges on the full matrix (redis-integration
+  # is intentionally excluded — it needs a live service and isn't required).
+  ci-success:
+    if: always()
+    needs: [test, compat]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert all upstream jobs succeeded
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.compat.result }}" != "success" ]; then
+            echo "::error::a required CI job failed (test=${{ needs.test.result }} compat=${{ needs.compat.result }})"
+            exit 1
+          fi
+          echo "all CI jobs green"
+
+  release-guard:
+    # Only runs on version tag pushes. Asserts the tag matches package.json and
+    # that CHANGELOG.md has a matching heading.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify tag matches package.json version and CHANGELOG
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag version:     ${TAG_VERSION}"
+          echo "Package version: ${PKG_VERSION}"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "::error::Git tag (${TAG_VERSION}) does not match package.json version (${PKG_VERSION})"
+            exit 1
+          fi
+          if ! grep -qE "^## ${PKG_VERSION//./\\.}( |$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${PKG_VERSION}' heading"
+            exit 1
+          fi
+          echo "release-guard OK"
