@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/fetch-client-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic browser fetch client: a single-flight 401 -> refresh -> retry transport with pluggable auth (cookie / bearer / csrf).",
   "author": "Andrew Popov",
   "license": "MIT",

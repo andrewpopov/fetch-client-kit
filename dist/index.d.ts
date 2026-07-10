@@ -21,6 +21,10 @@ export interface FetchClientOptions {
     /** Turn a non-ok Response into the Error that `request` rejects with. Defaults
      * to reading a JSON `{ error }` body, falling back to the status text. */
     parseError?: (response: Response) => Promise<Error>;
+    /** Called once when a refresh fails on a 401 (the retry could not proceed).
+     * Use it to clear auth state and redirect to login. Never throws the caller's
+     * error — the original request still rejects with its own error. */
+    onAuthFailure?: () => void;
 }
 export interface FetchClient {
     request<T>(path: string, options?: RequestInit): Promise<T>;
