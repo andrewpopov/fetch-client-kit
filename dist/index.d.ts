@@ -32,14 +32,14 @@ export interface FetchClient {
     refresh(): Promise<boolean>;
 }
 export declare function createFetchClient(options: FetchClientOptions): FetchClient;
-/** Cookie/session auth (smarthome): send credentials, add JSON headers, and
+/** Cookie/session auth: send credentials, add JSON headers, and
  * refresh by POSTing to the refresh path. Nothing is attached per-request beyond
  * `credentials`, because the browser carries the cookie. */
 export declare function cookieAuth(config?: {
     refreshPath?: string;
     credentials?: RequestCredentials;
 }): AuthStrategy;
-/** Bearer-token auth (savoro): read the access token from a store, add an
+/** Bearer-token auth: read the access token from a store, add an
  * Authorization header, and refresh by exchanging the refresh token. The token
  * accessors are injected so the package never owns where tokens live. */
 export declare function bearerAuth(config: {
@@ -50,7 +50,7 @@ export declare function bearerAuth(config: {
      * the refresh should be treated as failed. */
     onRefreshed: (response: Response) => Promise<boolean> | boolean;
 }): AuthStrategy;
-/** CSRF double-submit auth (towerpower): cookie-based session plus an
+/** CSRF double-submit auth: cookie-based session plus an
  * `x-csrf-token` header read from wherever the app keeps it. */
 export declare function csrfAuth(config?: {
     getCsrfToken: () => string | null;

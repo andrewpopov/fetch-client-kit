@@ -1,11 +1,11 @@
 "use strict";
 // @andrewpopov/fetch-client-kit
 //
-// One implementation of the transport that smarthome, savoro, and towerpower each
-// hand-rolled: a base-URL fetch wrapper that, on a 401, refreshes once and retries
-// — deduplicating concurrent refreshes so N overlapping 401s trigger exactly ONE
-// refresh. The three apps differed only in how auth attaches to a request (cookie,
-// bearer, csrf header); that is the one pluggable seam, an AuthStrategy.
+// One implementation of a transport apps commonly hand-roll: a base-URL fetch
+// wrapper that, on a 401, refreshes once and retries — deduplicating concurrent
+// refreshes so N overlapping 401s trigger exactly ONE refresh. Consumers differ
+// only in how auth attaches to a request (cookie, bearer, csrf header); that is
+// the one pluggable seam, an AuthStrategy.
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createFetchClient = createFetchClient;
 exports.cookieAuth = cookieAuth;
@@ -84,7 +84,7 @@ function createFetchClient(options) {
     return { request, refresh };
 }
 // --- Built-in auth strategies -------------------------------------------------
-/** Cookie/session auth (smarthome): send credentials, add JSON headers, and
+/** Cookie/session auth: send credentials, add JSON headers, and
  * refresh by POSTing to the refresh path. Nothing is attached per-request beyond
  * `credentials`, because the browser carries the cookie. */
 function cookieAuth(config = {}) {
@@ -109,7 +109,7 @@ function cookieAuth(config = {}) {
         },
     };
 }
-/** Bearer-token auth (savoro): read the access token from a store, add an
+/** Bearer-token auth: read the access token from a store, add an
  * Authorization header, and refresh by exchanging the refresh token. The token
  * accessors are injected so the package never owns where tokens live. */
 function bearerAuth(config) {
@@ -137,7 +137,7 @@ function bearerAuth(config) {
         },
     };
 }
-/** CSRF double-submit auth (towerpower): cookie-based session plus an
+/** CSRF double-submit auth: cookie-based session plus an
  * `x-csrf-token` header read from wherever the app keeps it. */
 function csrfAuth(config = { getCsrfToken: () => null }) {
     const { getCsrfToken, refreshPath = '/api/auth/refresh', credentials = 'include', headerName = 'x-csrf-token', } = config;
