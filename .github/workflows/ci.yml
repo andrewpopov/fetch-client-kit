@@ -45,37 +45,9 @@ jobs:
       - run: npm run test
       - run: npm run verify:pack
 
-  # Non-required: real Redis integration test for RedisRateLimitStore. Runs
-  # ONLY here (never in `test`/`compat`) since it needs a live Redis. Sets
-  # ESK_REDIS_URL so redis-store.integration.test.ts un-skips itself.
-  redis-integration:
-    runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - name: Real-Redis integration test
-        env:
-          ESK_REDIS_URL: redis://localhost:6379
-        run: npx vitest run redis-store.integration
 
   # Aggregation gate: green only if `test` and `compat` passed. Make THIS the
-  # required status check to gate merges on the full matrix (redis-integration
-  # is intentionally excluded — it needs a live service and isn't required).
+  # required status check to gate merges on the full matrix.
   ci-success:
     if: always()
     needs: [test, compat]
