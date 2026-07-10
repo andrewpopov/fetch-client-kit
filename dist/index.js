@@ -19,8 +19,24 @@ async function defaultParseError(response) {
     err.status = response.status;
     return err;
 }
+// A FormData body must NOT get an explicit Content-Type: the browser sets it,
+// including the multipart `boundary=` the server needs to parse the upload.
+// Forcing application/json there silently corrupts every file upload. Applies to
+// every strategy, so it lives here.
+function withContentType(request, extra = {}) {
+    const headers = {
+        ...request.headers,
+        ...extra,
+    };
+    const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
+    const alreadySet = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
+    if (!isFormData && !alreadySet) {
+        headers['Content-Type'] = 'application/json';
+    }
+    return headers;
+}
 function createFetchClient(options) {
-    const { baseUrl, auth, fetcher = fetch, authPathPrefixes = ['/api/auth/'], parseError = defaultParseError, } = options;
+    const { baseUrl, auth, fetcher = fetch, authPathPrefixes = ['/api/auth/'], parseError = defaultParseError, onAuthFailure, } = options;
     // Single-flight refresh: the FIRST 401 to arrive starts the refresh; every
     // other concurrent 401 awaits the SAME promise instead of firing its own. This
     // is the property all three consumers hand-rolled (and where they could each
@@ -54,6 +70,9 @@ function createFetchClient(options) {
             if (refreshed) {
                 response = await send(path, options);
             }
+            else if (onAuthFailure) {
+                onAuthFailure();
+            }
         }
         if (!response.ok) {
             throw await parseError(response);
@@ -72,11 +91,7 @@ function cookieAuth(config = {}) {
     const { refreshPath = '/api/auth/refresh', credentials = 'include' } = config;
     return {
         decorate(request) {
-            return {
-                ...request,
-                credentials,
-                headers: { 'Content-Type': 'application/json', ...request.headers },
-            };
+            return { ...request, credentials, headers: withContentType(request) };
         },
         async refresh({ baseUrl, fetcher }) {
             try {
@@ -102,12 +117,7 @@ function bearerAuth(config) {
     return {
         decorate(request) {
             const token = getAccessToken();
-            const headers = {
-                'Content-Type': 'application/json',
-                ...request.headers,
-            };
-            if (token)
-                headers.Authorization = `Bearer ${token}`;
+            const headers = withContentType(request, token ? { Authorization: `Bearer ${token}` } : {});
             return { ...request, credentials, headers };
         },
         async refresh({ baseUrl, fetcher }) {
@@ -133,13 +143,8 @@ function csrfAuth(config = { getCsrfToken: () => null }) {
     const { getCsrfToken, refreshPath = '/api/auth/refresh', credentials = 'include', headerName = 'x-csrf-token', } = config;
     return {
         decorate(request) {
-            const headers = {
-                'Content-Type': 'application/json',
-                ...request.headers,
-            };
             const token = getCsrfToken();
-            if (token)
-                headers[headerName] = token;
+            const headers = withContentType(request, token ? { [headerName]: token } : {});
             return { ...request, credentials, headers };
         },
         async refresh({ baseUrl, fetcher }) {

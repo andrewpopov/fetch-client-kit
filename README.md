@@ -3,7 +3,7 @@
 ## Install
 
 ```bash
-npm install github:andrewpopov/fetch-client-kit#v0.1.0
+npm install github:andrewpopov/fetch-client-kit#v0.2.0
 ```
 
 One browser fetch client that, on a `401`, refreshes **once** and retries —

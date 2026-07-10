@@ -150,3 +150,55 @@ describe('auth strategies', () => {
     await expect(client.request('/data')).rejects.toBeTruthy();
   });
 });
+
+describe('FormData handling (BWK-140)', () => {
+  for (const [name, make] of [
+    ['cookieAuth', () => cookieAuth()],
+    ['bearerAuth', () => bearerAuth({ getAccessToken: () => 't', onRefreshed: () => true })],
+    ['csrfAuth', () => csrfAuth({ getCsrfToken: () => 'c' })],
+  ] as const) {
+    it(`${name} does NOT set Content-Type on a FormData body (browser must set the boundary)`, () => {
+      const fd = new FormData();
+      fd.append('file', 'x');
+      const decorated = make().decorate({ method: 'POST', body: fd });
+      const headers = decorated.headers as Record<string, string>;
+      const ct = Object.entries(headers).find(([k]) => k.toLowerCase() === 'content-type');
+      expect(ct, `${name} must leave Content-Type unset for FormData`).toBeUndefined();
+    });
+
+    it(`${name} still sets application/json for a normal body`, () => {
+      const decorated = make().decorate({ method: 'POST', body: JSON.stringify({ a: 1 }) });
+      expect((decorated.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    });
+
+    it(`${name} does not override a Content-Type the caller already set`, () => {
+      const decorated = make().decorate({ headers: { 'Content-Type': 'text/plain' } });
+      expect((decorated.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
+    });
+  }
+});
+
+describe('onAuthFailure (BWK-140)', () => {
+  it('fires once when a refresh fails on a retriable 401', async () => {
+    const fetcher = (async (url: string) => {
+      if (url.endsWith('/api/auth/refresh')) return new Response('{}', { status: 401 });
+      return new Response(JSON.stringify({ error: 'no' }), { status: 401 });
+    }) as unknown as typeof fetch;
+    const onAuthFailure = vi.fn();
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher, onAuthFailure });
+    await expect(client.request('/data')).rejects.toBeTruthy();
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire when the request succeeds or the refresh succeeds', async () => {
+    let authed = false;
+    const fetcher = (async (url: string) => {
+      if (url.endsWith('/api/auth/refresh')) { authed = true; return new Response('{}', { status: 200 }); }
+      return new Response(JSON.stringify({ ok: true }), { status: authed ? 200 : 401 });
+    }) as unknown as typeof fetch;
+    const onAuthFailure = vi.fn();
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher, onAuthFailure });
+    await client.request('/data');
+    expect(onAuthFailure).not.toHaveBeenCalled();
+  });
+});

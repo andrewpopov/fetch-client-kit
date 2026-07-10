@@ -3,6 +3,18 @@
 All notable changes to `@andrewpopov/fetch-client-kit`. Versions are git tags
 (`vX.Y.Z`); see STANDARDS.md.
 
+## 0.2.0
+
+- **Fix — FormData bodies no longer get `Content-Type` forced.** All three
+  strategies set `Content-Type: application/json` unconditionally, which corrupts
+  a multipart upload: the browser must set `Content-Type` itself so it can include
+  the `boundary=` parameter. Now the JSON content-type is added only when the body
+  is not a `FormData` and the caller has not already set one. Found migrating
+  savoro, whose `postForm` sends FormData (Standard 1: superset before adoption).
+- **Feature — `onAuthFailure`** on `createFetchClient`: called once when a refresh
+  fails on a retriable 401, so a consumer can clear auth state and redirect to
+  login. The original request still rejects with its own error.
+
 ## 0.1.0
 
 Initial extraction (BWK-138). One 401-refresh-retry transport with a pluggable

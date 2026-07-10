@@ -31,6 +31,10 @@ export interface FetchClientOptions {
   /** Turn a non-ok Response into the Error that `request` rejects with. Defaults
    * to reading a JSON `{ error }` body, falling back to the status text. */
   parseError?: (response: Response) => Promise<Error>;
+  /** Called once when a refresh fails on a 401 (the retry could not proceed).
+   * Use it to clear auth state and redirect to login. Never throws the caller's
+   * error — the original request still rejects with its own error. */
+  onAuthFailure?: () => void;
 }
 
 export interface FetchClient {
@@ -48,6 +52,27 @@ async function defaultParseError(response: Response): Promise<Error> {
   return err;
 }
 
+
+// A FormData body must NOT get an explicit Content-Type: the browser sets it,
+// including the multipart `boundary=` the server needs to parse the upload.
+// Forcing application/json there silently corrupts every file upload. Applies to
+// every strategy, so it lives here.
+function withContentType(
+  request: RequestInit,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...(request.headers as Record<string, string> | undefined),
+    ...extra,
+  };
+  const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
+  const alreadySet = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
+  if (!isFormData && !alreadySet) {
+    headers['Content-Type'] = 'application/json';
+  }
+  return headers;
+}
+
 export function createFetchClient(options: FetchClientOptions): FetchClient {
   const {
     baseUrl,
@@ -55,6 +80,7 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
     fetcher = fetch,
     authPathPrefixes = ['/api/auth/'],
     parseError = defaultParseError,
+    onAuthFailure,
   } = options;
 
   // Single-flight refresh: the FIRST 401 to arrive starts the refresh; every
@@ -93,6 +119,8 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
       const refreshed = await refresh();
       if (refreshed) {
         response = await send(path, options);
+      } else if (onAuthFailure) {
+        onAuthFailure();
       }
     }
 
@@ -120,11 +148,7 @@ export function cookieAuth(config: {
   const { refreshPath = '/api/auth/refresh', credentials = 'include' } = config;
   return {
     decorate(request) {
-      return {
-        ...request,
-        credentials,
-        headers: { 'Content-Type': 'application/json', ...request.headers },
-      };
+      return { ...request, credentials, headers: withContentType(request) };
     },
     async refresh({ baseUrl, fetcher }) {
       try {
@@ -157,11 +181,7 @@ export function bearerAuth(config: {
   return {
     decorate(request) {
       const token = getAccessToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(request.headers as Record<string, string> | undefined),
-      };
-      if (token) headers.Authorization = `Bearer ${token}`;
+      const headers = withContentType(request, token ? { Authorization: `Bearer ${token}` } : {});
       return { ...request, credentials, headers };
     },
     async refresh({ baseUrl, fetcher }) {
@@ -196,12 +216,8 @@ export function csrfAuth(config: {
   } = config;
   return {
     decorate(request) {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(request.headers as Record<string, string> | undefined),
-      };
       const token = getCsrfToken();
-      if (token) headers[headerName] = token;
+      const headers = withContentType(request, token ? { [headerName]: token } : {});
       return { ...request, credentials, headers };
     },
     async refresh({ baseUrl, fetcher }) {
