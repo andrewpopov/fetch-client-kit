@@ -36,7 +36,13 @@ function withContentType(request, extra = {}) {
     return headers;
 }
 function createFetchClient(options) {
-    const { baseUrl, auth, fetcher = fetch, authPathPrefixes = ['/api/auth/'], parseError = defaultParseError, onAuthFailure, } = options;
+    const { baseUrl, auth, 
+    // Late-bound on purpose. `fetcher = fetch` would capture the CURRENT global
+    // fetch at construction time — and every consumer builds its client at module
+    // scope, before any test stubs `globalThis.fetch`. The client would then
+    // bypass the stub and hit the real network, silently. Re-resolving the global
+    // per call keeps the default late-bound so a later stub is honoured.
+    fetcher = (input, init) => fetch(input, init), authPathPrefixes = ['/api/auth/'], parseError = defaultParseError, onAuthFailure, } = options;
     // Single-flight refresh: the FIRST 401 to arrive starts the refresh; every
     // other concurrent 401 awaits the SAME promise instead of firing its own. This
     // is the property all three consumers hand-rolled (and where they could each
