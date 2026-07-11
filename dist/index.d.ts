@@ -39,6 +39,40 @@ export declare function cookieAuth(config?: {
     refreshPath?: string;
     credentials?: RequestCredentials;
 }): AuthStrategy;
+/**
+ * Cross-tab refresh coordination for `bearerAuth` (opt-in, off by default).
+ *
+ * Why bearerAuth only: this only matters when the access token lives in
+ * memory in the tab. `cookieAuth` and `csrfAuth` rely on the browser's
+ * session cookie, which the browser already shares across tabs — there is
+ * nothing to broadcast. `bearerAuth` is the one strategy where each tab
+ * holds its own copy of the token (via `getAccessToken`), so it is the one
+ * strategy where sibling tabs can independently race the refresh endpoint.
+ *
+ * This is a NICETY, NOT A SECURITY CONTROL. The authoritative protection
+ * against the benign refresh-rotation race is the server-side grace window
+ * that tolerates the old token briefly after rotation. BroadcastChannel just
+ * saves redundant refresh calls by letting sibling tabs adopt a token a
+ * sibling already minted. It is same-origin only (the browser enforces
+ * this) and never carries the refresh token — only the short-lived access
+ * token this package already has via `getAccessToken`/`onRefreshed`.
+ */
+export interface CrossTabRefreshOptions {
+    /** BroadcastChannel name. Give each app its own so two apps on the same
+     * origin don't cross-talk on a shared channel namespace. */
+    channelName: string;
+    /** Called when a sibling tab broadcasts a freshly refreshed access token,
+     * so this tab can adopt it (e.g. write it into its own token store)
+     * without making its own refresh call. Only ever called with the access
+     * token — the refresh token is never broadcast. */
+    onTokenReceived: (accessToken: string) => void;
+}
+/** `bearerAuth`'s return type, extended with a `close()` to dispose of the
+ * BroadcastChannel opened for `crossTabRefresh` (no-op if that option was not
+ * used). Call it on unmount / hot-reload so channels don't leak. */
+export interface BearerAuthStrategy extends AuthStrategy {
+    close(): void;
+}
 /** Bearer-token auth: read the access token from a store, add an
  * Authorization header, and refresh by exchanging the refresh token. The token
  * accessors are injected so the package never owns where tokens live. */
@@ -49,7 +83,10 @@ export declare function bearerAuth(config: {
     /** Given the refresh Response, persist the new tokens. Return false to signal
      * the refresh should be treated as failed. */
     onRefreshed: (response: Response) => Promise<boolean> | boolean;
-}): AuthStrategy;
+    /** Opt-in cross-tab refresh coordination. Off by default; v0.2.0 behaviour
+     * is unchanged when omitted. See `CrossTabRefreshOptions` for the caveats. */
+    crossTabRefresh?: CrossTabRefreshOptions;
+}): BearerAuthStrategy;
 /** CSRF double-submit auth: cookie-based session plus an
  * `x-csrf-token` header read from wherever the app keeps it. */
 export declare function csrfAuth(config?: {

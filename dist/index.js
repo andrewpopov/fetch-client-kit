@@ -113,7 +113,19 @@ function cookieAuth(config = {}) {
  * Authorization header, and refresh by exchanging the refresh token. The token
  * accessors are injected so the package never owns where tokens live. */
 function bearerAuth(config) {
-    const { getAccessToken, refreshPath = '/api/auth/refresh', credentials = 'include', onRefreshed } = config;
+    const { getAccessToken, refreshPath = '/api/auth/refresh', credentials = 'include', onRefreshed, crossTabRefresh } = config;
+    // Degrade silently when BroadcastChannel is unavailable (SSR, old
+    // browsers): channel stays null, and every use below is optional-chained.
+    const channel = crossTabRefresh && typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel(crossTabRefresh.channelName)
+        : null;
+    if (channel && crossTabRefresh) {
+        channel.onmessage = (event) => {
+            if (typeof event.data === 'string' && event.data.length > 0) {
+                crossTabRefresh.onTokenReceived(event.data);
+            }
+        };
+    }
     return {
         decorate(request) {
             const token = getAccessToken();
@@ -129,11 +141,23 @@ function bearerAuth(config) {
                 });
                 if (!res.ok)
                     return false;
-                return await onRefreshed(res);
+                const refreshed = await onRefreshed(res);
+                // Broadcast the newly-stored access token (never the refresh token —
+                // this package never has one) so sibling tabs on the same channel can
+                // adopt it instead of each firing their own refresh call.
+                if (refreshed && channel) {
+                    const token = getAccessToken();
+                    if (token)
+                        channel.postMessage(token);
+                }
+                return refreshed;
             }
             catch {
                 return false;
             }
+        },
+        close() {
+            channel?.close();
         },
     };
 }

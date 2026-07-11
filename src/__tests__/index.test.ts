@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createFetchClient, cookieAuth, bearerAuth, csrfAuth } from '../index';
 
+// Real BroadcastChannel is used throughout this file (Node >=18 ships a
+// global BroadcastChannel; confirmed present in this repo's Node 24). Where a
+// test needs to simulate its absence (SSR / old browsers), it deletes and
+// restores the global explicitly rather than using a fake implementation.
+
 // A fake fetch that returns 401 until a refresh flips it to 200. Records every
 // call so we can assert how many refreshes actually happened.
 function makeFetch(opts: {
@@ -176,6 +181,143 @@ describe('FormData handling (BWK-140)', () => {
       expect((decorated.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
     });
   }
+});
+
+describe('crossTabRefresh (bearerAuth, BWK-142)', () => {
+  // Simulates a "tab": its own in-memory token store plus a bearerAuth
+  // strategy wired to it.
+  function makeTab(opts: { channelName?: string; onTokenReceived?: (t: string) => void } = {}) {
+    const store: { token: string | null } = { token: null };
+    const onTokenReceived = opts.onTokenReceived ?? ((t: string) => { store.token = t; });
+    const auth = bearerAuth({
+      getAccessToken: () => store.token,
+      onRefreshed: async (res) => {
+        const body = (await res.json()) as { accessToken: string };
+        store.token = body.accessToken;
+        return true;
+      },
+      ...(opts.channelName ? { crossTabRefresh: { channelName: opts.channelName, onTokenReceived } } : {}),
+    });
+    return { store, auth };
+  }
+
+  // A fetcher for a single tab: 401s until `authed(store)` says the current
+  // token is accepted, at which point it 200s. The refresh endpoint always
+  // succeeds and mints `refreshToken` (never exposed as the access token).
+  function makeTabFetcher(store: { token: string | null }, mintedAccessToken: string) {
+    const calls: string[] = [];
+    const fetcher = (async (url: string) => {
+      calls.push(url);
+      if (url.endsWith('/api/auth/refresh')) {
+        return new Response(
+          JSON.stringify({ accessToken: mintedAccessToken, refreshToken: 'super-secret-refresh-token' }),
+          { status: 200 },
+        );
+      }
+      if (store.token === mintedAccessToken) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+    }) as unknown as typeof fetch;
+    return { fetcher, calls };
+  }
+
+  it('client A refreshes; client B adopts the new token without ever hitting the refresh endpoint', async () => {
+    const channelName = `bwk-142-adopt-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({ channelName });
+
+    const fA = makeTabFetcher(a.store, 'fresh-token');
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+    await clientA.request('/data'); // 401 -> refresh -> retry; broadcasts 'fresh-token'
+
+    // Wait for the async BroadcastChannel delivery to reach tab B.
+    await vi.waitFor(() => expect(b.store.token).toBe('fresh-token'));
+
+    // B now makes its OWN request. Because it already adopted the fresh
+    // token, it should succeed on the first try and never need to refresh.
+    const fB = makeTabFetcher(b.store, 'fresh-token');
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: fB.fetcher });
+    const result = await clientB.request<{ ok: boolean }>('/data');
+
+    expect(result).toEqual({ ok: true });
+    expect(fB.calls).not.toContain('http://x/api/auth/refresh');
+    expect(fB.calls).toEqual(['http://x/data']); // single request, no refresh round-trip
+
+    a.auth.close();
+    b.auth.close();
+  });
+
+  it('degrades silently when BroadcastChannel is unavailable: refresh still succeeds, nothing throws', async () => {
+    const original = globalThis.BroadcastChannel;
+    // @ts-expect-error - simulating an environment without BroadcastChannel (SSR / old browsers)
+    delete globalThis.BroadcastChannel;
+    try {
+      const onTokenReceived = vi.fn();
+      expect(() =>
+        bearerAuth({
+          getAccessToken: () => null,
+          onRefreshed: () => true,
+          crossTabRefresh: { channelName: 'bwk-142-no-bc', onTokenReceived },
+        }),
+      ).not.toThrow();
+
+      const a = makeTab({ channelName: 'bwk-142-no-bc' });
+      const fA = makeTabFetcher(a.store, 'fresh-token');
+      const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+      await expect(clientA.request('/data')).resolves.toEqual({ ok: true });
+      expect(a.store.token).toBe('fresh-token');
+      expect(() => a.auth.close()).not.toThrow();
+    } finally {
+      globalThis.BroadcastChannel = original;
+    }
+  });
+
+  it('isolates by channel name: tabs on different channels do not see each other\'s tokens', async () => {
+    const a = makeTab({ channelName: 'bwk-142-chan-a' });
+    const b = makeTab({ channelName: 'bwk-142-chan-b' });
+
+    const fA = makeTabFetcher(a.store, 'fresh-token');
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+    await clientA.request('/data');
+
+    // Give any (incorrect) cross-talk a chance to arrive before asserting absence.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(b.store.token).toBeNull();
+
+    a.auth.close();
+    b.auth.close();
+  });
+
+  it('opt-out is the default: no BroadcastChannel is constructed when crossTabRefresh is omitted', async () => {
+    const ctor = vi.spyOn(globalThis, 'BroadcastChannel');
+    const a = makeTab(); // no channelName -> no crossTabRefresh option passed
+    const fA = makeTabFetcher(a.store, 'fresh-token');
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+    await clientA.request('/data');
+
+    expect(ctor).not.toHaveBeenCalled();
+    expect(() => a.auth.close()).not.toThrow(); // close() is always safe, even with no channel
+    ctor.mockRestore();
+  });
+
+  it('never broadcasts the refresh token — only the short-lived access token crosses the channel', async () => {
+    const channelName = `bwk-142-secret-${Math.random()}`;
+    const received: string[] = [];
+    const a = makeTab({ channelName, onTokenReceived: (t) => received.push(t) });
+    const b = makeTab({ channelName, onTokenReceived: (t) => received.push(t) });
+
+    const fA = makeTabFetcher(a.store, 'fresh-token');
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+    await clientA.request('/data');
+
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(0));
+    expect(received).toEqual(['fresh-token']);
+    expect(received.some((t) => t.includes('super-secret-refresh-token'))).toBe(false);
+
+    a.auth.close();
+    b.auth.close();
+  });
 });
 
 describe('onAuthFailure (BWK-140)', () => {
