@@ -166,6 +166,42 @@ export function cookieAuth(config: {
   };
 }
 
+/**
+ * Cross-tab refresh coordination for `bearerAuth` (opt-in, off by default).
+ *
+ * Why bearerAuth only: this only matters when the access token lives in
+ * memory in the tab. `cookieAuth` and `csrfAuth` rely on the browser's
+ * session cookie, which the browser already shares across tabs — there is
+ * nothing to broadcast. `bearerAuth` is the one strategy where each tab
+ * holds its own copy of the token (via `getAccessToken`), so it is the one
+ * strategy where sibling tabs can independently race the refresh endpoint.
+ *
+ * This is a NICETY, NOT A SECURITY CONTROL. The authoritative protection
+ * against the benign refresh-rotation race is the server-side grace window
+ * that tolerates the old token briefly after rotation. BroadcastChannel just
+ * saves redundant refresh calls by letting sibling tabs adopt a token a
+ * sibling already minted. It is same-origin only (the browser enforces
+ * this) and never carries the refresh token — only the short-lived access
+ * token this package already has via `getAccessToken`/`onRefreshed`.
+ */
+export interface CrossTabRefreshOptions {
+  /** BroadcastChannel name. Give each app its own so two apps on the same
+   * origin don't cross-talk on a shared channel namespace. */
+  channelName: string;
+  /** Called when a sibling tab broadcasts a freshly refreshed access token,
+   * so this tab can adopt it (e.g. write it into its own token store)
+   * without making its own refresh call. Only ever called with the access
+   * token — the refresh token is never broadcast. */
+  onTokenReceived: (accessToken: string) => void;
+}
+
+/** `bearerAuth`'s return type, extended with a `close()` to dispose of the
+ * BroadcastChannel opened for `crossTabRefresh` (no-op if that option was not
+ * used). Call it on unmount / hot-reload so channels don't leak. */
+export interface BearerAuthStrategy extends AuthStrategy {
+  close(): void;
+}
+
 /** Bearer-token auth: read the access token from a store, add an
  * Authorization header, and refresh by exchanging the refresh token. The token
  * accessors are injected so the package never owns where tokens live. */
@@ -176,8 +212,28 @@ export function bearerAuth(config: {
   /** Given the refresh Response, persist the new tokens. Return false to signal
    * the refresh should be treated as failed. */
   onRefreshed: (response: Response) => Promise<boolean> | boolean;
-}): AuthStrategy {
-  const { getAccessToken, refreshPath = '/api/auth/refresh', credentials = 'include', onRefreshed } = config;
+  /** Opt-in cross-tab refresh coordination. Off by default; v0.2.0 behaviour
+   * is unchanged when omitted. See `CrossTabRefreshOptions` for the caveats. */
+  crossTabRefresh?: CrossTabRefreshOptions;
+}): BearerAuthStrategy {
+  const { getAccessToken, refreshPath = '/api/auth/refresh', credentials = 'include', onRefreshed, crossTabRefresh } =
+    config;
+
+  // Degrade silently when BroadcastChannel is unavailable (SSR, old
+  // browsers): channel stays null, and every use below is optional-chained.
+  const channel =
+    crossTabRefresh && typeof BroadcastChannel !== 'undefined'
+      ? new BroadcastChannel(crossTabRefresh.channelName)
+      : null;
+
+  if (channel && crossTabRefresh) {
+    channel.onmessage = (event: MessageEvent<unknown>) => {
+      if (typeof event.data === 'string' && event.data.length > 0) {
+        crossTabRefresh.onTokenReceived(event.data);
+      }
+    };
+  }
+
   return {
     decorate(request) {
       const token = getAccessToken();
@@ -192,10 +248,21 @@ export function bearerAuth(config: {
           credentials,
         });
         if (!res.ok) return false;
-        return await onRefreshed(res);
+        const refreshed = await onRefreshed(res);
+        // Broadcast the newly-stored access token (never the refresh token —
+        // this package never has one) so sibling tabs on the same channel can
+        // adopt it instead of each firing their own refresh call.
+        if (refreshed && channel) {
+          const token = getAccessToken();
+          if (token) channel.postMessage(token);
+        }
+        return refreshed;
       } catch {
         return false;
       }
+    },
+    close() {
+      channel?.close();
     },
   };
 }

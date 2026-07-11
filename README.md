@@ -9,7 +9,7 @@ dependencies; the browser `fetch` is the only ambient requirement.
 ## Install
 
 ```bash
-npm install github:andrewpopov/fetch-client-kit#v0.2.0
+npm install github:andrewpopov/fetch-client-kit#v0.3.0
 ```
 
 ## Usage
@@ -26,7 +26,7 @@ const user = await api.request<User>('/me');
 | Strategy | Attaches | For |
 |---|---|---|
 | `cookieAuth()` | `credentials: 'include'` | session cookies |
-| `bearerAuth({ getAccessToken, onRefreshed })` | `Authorization: Bearer …` | a token kept in your own store |
+| `bearerAuth({ getAccessToken, onRefreshed, crossTabRefresh? })` | `Authorization: Bearer …` | a token kept in your own store |
 | `csrfAuth({ getCsrfToken })` | `x-csrf-token` header | CSRF double-submit |
 
 Every built-in strategy accepts `refreshPath` (default `'/api/auth/refresh'`)
@@ -38,6 +38,56 @@ multipart `boundary=`.
 The token accessors are injected, so the package never owns where tokens live.
 Write your own `AuthStrategy` for anything else — it is a two-method interface
 (`decorate` a request, `refresh`).
+
+## Cross-tab refresh coordination (`bearerAuth` only)
+
+`bearerAuth` accepts an opt-in `crossTabRefresh` option. It is **off by
+default** — omit it and v0.2.0 behaviour is unchanged byte-for-byte.
+
+```ts
+import { createFetchClient, bearerAuth } from '@andrewpopov/fetch-client-kit';
+
+let accessToken: string | null = null; // in-memory only — never localStorage
+
+const auth = bearerAuth({
+  getAccessToken: () => accessToken,
+  onRefreshed: async (res) => {
+    const body = await res.json();
+    accessToken = body.accessToken;
+    return true;
+  },
+  crossTabRefresh: {
+    // Give each app its own name so two apps on the same origin don't cross-talk.
+    channelName: 'my-app-auth-refresh',
+    // Fired when a sibling tab already refreshed — adopt its token instead
+    // of this tab making its own refresh call.
+    onTokenReceived: (token) => { accessToken = token; },
+  },
+});
+
+const api = createFetchClient({ baseUrl: '/api', auth });
+// ...
+auth.close(); // dispose the BroadcastChannel (tests, hot-reload)
+```
+
+This only matters for `bearerAuth`: the access token lives in memory in the
+tab, so sibling tabs each hold their own copy and can independently race the
+refresh endpoint. `cookieAuth` and `csrfAuth` rely on the browser's session
+cookie, which is already shared across tabs — there's nothing to broadcast.
+
+**This is a nicety, not a security control.** The authoritative protection
+against the benign refresh-rotation race is your server's rotation grace
+window (tolerating the just-rotated-out token for a short overlap).
+BroadcastChannel only saves redundant refresh round-trips by letting sibling
+tabs adopt a token a sibling already minted.
+
+- `BroadcastChannel` is same-origin only — no cross-origin leakage risk.
+- Only the short-lived **access token** is ever broadcast, never a refresh
+  token; this package never has a refresh token to begin with (`bearerAuth`
+  only handles the access token, via `getAccessToken`/`onRefreshed`).
+- Degrades silently when `BroadcastChannel` is unavailable (SSR, older
+  browsers) — it never throws, the client just works without cross-tab
+  adoption.
 
 ## API
 

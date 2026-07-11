@@ -3,6 +3,29 @@
 All notable changes to `@andrewpopov/fetch-client-kit`. Versions are git tags
 (`vX.Y.Z`); see STANDARDS.md.
 
+## 0.3.0
+
+- **Feature — `crossTabRefresh` on `bearerAuth`.** Opt-in, off by default;
+  v0.2.0 behaviour is unchanged when the option is omitted. When set, the
+  strategy opens a `BroadcastChannel` under the given `channelName`; a
+  successful refresh broadcasts the freshly-stored access token so sibling
+  tabs (same origin, same channel name) can adopt it via `onTokenReceived`
+  instead of each independently hammering the refresh endpoint. Degrades
+  silently when `BroadcastChannel` is unavailable (SSR, old browsers) —
+  never throws. `bearerAuth` now returns a `close()` alongside `decorate`/
+  `refresh` to dispose of the channel (tests, hot-reload).
+  This is a **nicety, not a security control** — the server-side rotation
+  grace window remains the authoritative defense against the benign refresh
+  race; BroadcastChannel just saves redundant refresh calls. Only the
+  short-lived access token is ever broadcast, never a refresh token — the
+  package never has one to begin with (bearerAuth only handles the access
+  token via `getAccessToken`/`onRefreshed`). Scoped to `bearerAuth`: `cookieAuth`
+  and `csrfAuth` rely on the browser's session cookie, which is already shared
+  across tabs, so there is nothing to broadcast. Merged up from sano-os's
+  local `api.ts`/`auth.ts`, which had this and kept its access token in
+  memory only (never localStorage) — motivating why the feature lives on
+  `bearerAuth`, the one strategy with an in-tab token.
+
 ## 0.2.0
 
 - **Fix — FormData bodies no longer get `Content-Type` forced.** All three
