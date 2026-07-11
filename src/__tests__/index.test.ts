@@ -344,3 +344,30 @@ describe('onAuthFailure (BWK-140)', () => {
     expect(onAuthFailure).not.toHaveBeenCalled();
   });
 });
+
+describe('default fetcher is late-bound', () => {
+  it('honours a global fetch stubbed AFTER the client was constructed', async () => {
+    // Every consumer builds its client at module scope; test frameworks stub
+    // globalThis.fetch later, in beforeEach. A default of `fetcher = fetch`
+    // captures the global at construction and silently bypasses that stub —
+    // sending real network traffic from the test suite.
+    const original = globalThis.fetch;
+    try {
+      const client = createFetchClient({
+        baseUrl: 'https://example.test',
+        auth: bearerAuth({ getAccessToken: () => 'tok', onRefreshed: () => true }),
+      });
+
+      let stubbed = false;
+      globalThis.fetch = (async () => {
+        stubbed = true;
+        return new Response('{"ok":true}', { status: 200 });
+      }) as typeof fetch;
+
+      await client.request('/thing');
+      expect(stubbed).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

@@ -77,7 +77,12 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
   const {
     baseUrl,
     auth,
-    fetcher = fetch,
+    // Late-bound on purpose. `fetcher = fetch` would capture the CURRENT global
+    // fetch at construction time — and every consumer builds its client at module
+    // scope, before any test stubs `globalThis.fetch`. The client would then
+    // bypass the stub and hit the real network, silently. Re-resolving the global
+    // per call keeps the default late-bound so a later stub is honoured.
+    fetcher = (input, init) => fetch(input, init),
     authPathPrefixes = ['/api/auth/'],
     parseError = defaultParseError,
     onAuthFailure,

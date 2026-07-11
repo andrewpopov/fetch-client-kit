@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+**Testability fix.** `createFetchClient`'s default fetcher was `fetcher = fetch`,
+a default parameter that captures the **current global `fetch` at construction
+time**. Every consumer builds its client at module scope — before any test stubs
+`globalThis.fetch` — so the client **bypassed the stub and sent real network
+traffic from the test suite**, silently.
+
+Found while adopting the package in sano-os: `apiGet` reached the network and
+failed with `TypeError: Failed to parse URL from /api/goals` instead of hitting
+the mock. sano-os patched around it locally; the fix belongs here, because every
+consumer that stubs `fetch` in tests has the same latent problem.
+
+The default is now late-bound (`(input, init) => fetch(input, init)`), so a stub
+installed after construction is honoured. Passing an explicit `fetcher` is
+unchanged. Pinned by a regression test that fails against the old default.
+
 All notable changes to `@andrewpopov/fetch-client-kit`. Versions are git tags
 (`vX.Y.Z`); see STANDARDS.md.
 
