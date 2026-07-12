@@ -43,7 +43,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:pack": "node scripts/verify-pack.mjs"
