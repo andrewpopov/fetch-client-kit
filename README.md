@@ -128,3 +128,8 @@ npm ci
 npm run verify
 npm audit --omit=dev --audit-level=high
 ```
+
+## Project policies
+
+See [Contributing](./CONTRIBUTING.md), [Support](./SUPPORT.md), and the
+[Security Policy](./SECURITY.md). This package is licensed under [MIT](./LICENSE).

@@ -2,6 +2,7 @@
 
 ## 0.3.3
 
+- Add public contribution, support, and private vulnerability-reporting policies.
 - **Correctness — preserve every standard `HeadersInit` form.** Built-in auth
   strategies previously spread `request.headers` as a plain object. A native
   `Headers` instance (and tuple-array headers) therefore lost its values when
