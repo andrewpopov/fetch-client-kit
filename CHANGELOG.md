@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.3
+
+- **Correctness — preserve every standard `HeadersInit` form.** Built-in auth
+  strategies previously spread `request.headers` as a plain object. A native
+  `Headers` instance (and tuple-array headers) therefore lost its values when
+  the strategy decorated the request. Headers now normalize through `Headers`
+  before auth/content-type headers are applied; a regression test covers the
+  native `Headers` case.
+- **Reliability — protect request errors from `onAuthFailure`.** This callback
+  is an observer for auth-state cleanup and redirects. If it throws, the client
+  now still rejects with the original failed request error.
+- **Developer experience — add `npm run verify`.** The documented local gate
+  runs type checking, tests, build, and tarball-install export verification.
+
 ## 0.3.2
 
 Fix — expose `./package.json` in the `exports` map. Without it,

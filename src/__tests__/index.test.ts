@@ -108,7 +108,7 @@ describe('auth strategies', () => {
       auth: bearerAuth({ getAccessToken: () => 'tok123', onRefreshed: () => true }),
     });
     await client.request('/data');
-    expect(seen[0].Authorization).toBe('Bearer tok123');
+    expect(new Headers(seen[0]).get('Authorization')).toBe('Bearer tok123');
   });
 
   it('bearerAuth omits Authorization when there is no token', async () => {
@@ -123,7 +123,7 @@ describe('auth strategies', () => {
       auth: bearerAuth({ getAccessToken: () => null, onRefreshed: () => true }),
     });
     await client.request('/data');
-    expect(seen[0].Authorization).toBeUndefined();
+    expect(new Headers(seen[0]).get('Authorization')).toBeNull();
   });
 
   it('csrfAuth adds the x-csrf-token header from the accessor', async () => {
@@ -138,7 +138,19 @@ describe('auth strategies', () => {
       auth: csrfAuth({ getCsrfToken: () => 'csrf-abc' }),
     });
     await client.request('/data', { method: 'POST' });
-    expect(seen[0]['x-csrf-token']).toBe('csrf-abc');
+    expect(new Headers(seen[0]).get('x-csrf-token')).toBe('csrf-abc');
+  });
+
+  it('preserves caller headers supplied as a Headers instance', () => {
+    const decorated = cookieAuth().decorate({
+      headers: new Headers([
+        ['X-Request-Id', 'request-123'],
+        ['Content-Type', 'text/plain'],
+      ]),
+    });
+    const headers = new Headers(decorated.headers);
+    expect(headers.get('X-Request-Id')).toBe('request-123');
+    expect(headers.get('Content-Type')).toBe('text/plain');
   });
 
   it('bearerAuth.onRefreshed returning false fails the refresh', async () => {
@@ -173,12 +185,12 @@ describe('FormData handling (BWK-140)', () => {
 
     it(`${name} still sets application/json for a normal body`, () => {
       const decorated = make().decorate({ method: 'POST', body: JSON.stringify({ a: 1 }) });
-      expect((decorated.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+      expect(new Headers(decorated.headers).get('Content-Type')).toBe('application/json');
     });
 
     it(`${name} does not override a Content-Type the caller already set`, () => {
       const decorated = make().decorate({ headers: { 'Content-Type': 'text/plain' } });
-      expect((decorated.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
+      expect(new Headers(decorated.headers).get('Content-Type')).toBe('text/plain');
     });
   }
 });
@@ -342,6 +354,20 @@ describe('onAuthFailure (BWK-140)', () => {
     const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher, onAuthFailure });
     await client.request('/data');
     expect(onAuthFailure).not.toHaveBeenCalled();
+  });
+
+  it('preserves the original request error when the observer throws', async () => {
+    const fetcher = (async (url: string) => {
+      if (url.endsWith('/api/auth/refresh')) return new Response('{}', { status: 401 });
+      return new Response(JSON.stringify({ error: 'session expired' }), { status: 401 });
+    }) as unknown as typeof fetch;
+    const onAuthFailure = vi.fn(() => {
+      throw new Error('redirect failed');
+    });
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher, onAuthFailure });
+
+    await expect(client.request('/data')).rejects.toThrow('session expired');
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
   });
 });
 

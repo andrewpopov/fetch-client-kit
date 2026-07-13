@@ -9,7 +9,7 @@ dependencies; the browser `fetch` is the only ambient requirement.
 ## Install
 
 ```bash
-npm install github:andrewpopov/fetch-client-kit#v0.3.0
+npm install github:andrewpopov/fetch-client-kit#v0.3.3
 ```
 
 ## Usage
@@ -34,6 +34,10 @@ and `credentials`; `csrfAuth` also accepts `headerName`. Each adds
 `Content-Type: application/json` unless the caller already set one or the body
 is a `FormData` — the browser must set that header itself to include the
 multipart `boundary=`.
+
+Caller headers may use any standard `HeadersInit` form: a plain object, tuple
+array, or `Headers` instance. Their values are retained when a strategy adds
+its own auth and content-type headers.
 
 The token accessors are injected, so the package never owns where tokens live.
 Write your own `AuthStrategy` for anything else — it is a two-method interface
@@ -100,7 +104,7 @@ tabs adopt a token a sibling already minted.
 | `fetcher` | global `fetch` | injected for tests |
 | `authPathPrefixes` | `['/api/auth/']` | paths (matched by prefix) whose `401`s never trigger a refresh — the auth endpoints themselves |
 | `parseError` | reads a JSON `{ error }` body, falls back to status text | turns a non-ok `Response` into the `Error` that `request` rejects with |
-| `onAuthFailure` | — | called once when a refresh fails on a retriable `401`, e.g. to clear auth state and redirect to login; the request still rejects with its own error |
+| `onAuthFailure` | — | called once when a refresh fails on a retriable `401`, e.g. to clear auth state and redirect to login; it is an observer hook, so an exception from it cannot replace the request's own error |
 
 - `request<T>(path, init?)` — resolves with the parsed JSON body. `204` and
   empty bodies resolve to `undefined`; non-ok responses reject with
@@ -113,3 +117,14 @@ tabs adopt a token a sibling already minted.
 The first `401` starts a refresh; every concurrent `401` awaits the **same**
 promise instead of firing its own. Auth-endpoint `401`s never trigger a refresh.
 A failed refresh does not retry — the original error surfaces.
+
+## Verify locally
+
+GitHub Actions are optional for this repository. Before opening a change or
+cutting a tag, run the local release gate:
+
+```bash
+npm ci
+npm run verify
+npm audit --omit=dev --audit-level=high
+```
