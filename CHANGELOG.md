@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+Fix — expose `./package.json` in the `exports` map. Without it,
+`require('@andrewpopov/fetch-client-kit/package.json')` threw
+`ERR_PACKAGE_PATH_NOT_EXPORTED` — which broke the standards' own documented way of
+verifying an INSTALLED version, the guard against the `github:` re-resolve trap.
+
+No runtime change.
+
 ## 0.3.1
 
 **Testability fix.** `createFetchClient`'s default fetcher was `fetcher = fetch`,
