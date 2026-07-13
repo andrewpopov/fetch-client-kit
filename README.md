@@ -9,7 +9,7 @@ dependencies; the browser `fetch` is the only ambient requirement.
 ## Install
 
 ```bash
-npm install github:andrewpopov/fetch-client-kit#v0.3.3
+npm install github:andrewpopov/fetch-client-kit#v0.3.2
 ```
 
 ## Usage
