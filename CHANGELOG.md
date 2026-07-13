@@ -13,6 +13,7 @@
   now still rejects with the original failed request error.
 - **Developer experience — add `npm run verify`.** The documented local gate
   runs type checking, tests, build, and tarball-install export verification.
+- **Developer security — upgrade Vitest** to a version with no known advisories.
 
 ## 0.3.2
 
