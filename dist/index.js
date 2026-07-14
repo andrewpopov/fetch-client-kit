@@ -24,16 +24,22 @@ async function defaultParseError(response) {
 // Forcing application/json there silently corrupts every file upload. Applies to
 // every strategy, so it lives here.
 function withContentType(request, extra = {}) {
-    const headers = {
-        ...request.headers,
-        ...extra,
-    };
-    const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
-    const alreadySet = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
-    if (!isFormData && !alreadySet) {
-        headers['Content-Type'] = 'application/json';
+    // `HeadersInit` also permits a `Headers` instance and a tuple array. Spreading
+    // either as an object silently drops header values, so normalize through the
+    // platform constructor before applying strategy-owned headers.
+    const headers = new Headers(request.headers);
+    for (const [name, value] of Object.entries(extra)) {
+        headers.set(name, value);
     }
-    return headers;
+    const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
+    if (!isFormData && !headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+    }
+    const normalized = {};
+    headers.forEach((value, name) => {
+        normalized[name] = value;
+    });
+    return normalized;
 }
 function createFetchClient(options) {
     const { baseUrl, auth, 
@@ -77,7 +83,14 @@ function createFetchClient(options) {
                 response = await send(path, options);
             }
             else if (onAuthFailure) {
-                onAuthFailure();
+                // This is an observer hook. A redirect or state-cleanup error must not
+                // replace the request error the caller needs to handle.
+                try {
+                    onAuthFailure();
+                }
+                catch {
+                    // Preserve the original failed response below.
+                }
             }
         }
         if (!response.ok) {

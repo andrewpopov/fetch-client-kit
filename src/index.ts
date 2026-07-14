@@ -61,16 +61,22 @@ function withContentType(
   request: RequestInit,
   extra: Record<string, string> = {},
 ): Record<string, string> {
-  const headers: Record<string, string> = {
-    ...(request.headers as Record<string, string> | undefined),
-    ...extra,
-  };
-  const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
-  const alreadySet = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
-  if (!isFormData && !alreadySet) {
-    headers['Content-Type'] = 'application/json';
+  // `HeadersInit` also permits a `Headers` instance and a tuple array. Spreading
+  // either as an object silently drops header values, so normalize through the
+  // platform constructor before applying strategy-owned headers.
+  const headers = new Headers(request.headers);
+  for (const [name, value] of Object.entries(extra)) {
+    headers.set(name, value);
   }
-  return headers;
+  const isFormData = typeof FormData !== 'undefined' && request.body instanceof FormData;
+  if (!isFormData && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const normalized: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    normalized[name] = value;
+  });
+  return normalized;
 }
 
 export function createFetchClient(options: FetchClientOptions): FetchClient {
@@ -125,7 +131,13 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
       if (refreshed) {
         response = await send(path, options);
       } else if (onAuthFailure) {
-        onAuthFailure();
+        // This is an observer hook. A redirect or state-cleanup error must not
+        // replace the request error the caller needs to handle.
+        try {
+          onAuthFailure();
+        } catch {
+          // Preserve the original failed response below.
+        }
       }
     }
 

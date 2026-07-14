@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/fetch-client-kit",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Framework-agnostic browser fetch client: a single-flight 401 -> refresh -> retry transport with pluggable auth (cookie / bearer / csrf).",
   "author": "Andrew Popov",
   "license": "MIT",
@@ -47,11 +47,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:pack": "node scripts/verify-pack.mjs"
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "verify": "npm run typecheck && npm test && npm run build && npm run verify:pack"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.10"
   }
 }
