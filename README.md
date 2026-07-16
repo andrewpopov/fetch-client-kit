@@ -79,11 +79,45 @@ tab, so sibling tabs each hold their own copy and can independently race the
 refresh endpoint. `cookieAuth` and `csrfAuth` rely on the browser's session
 cookie, which is already shared across tabs — there's nothing to broadcast.
 
-**This is a nicety, not a security control.** The authoritative protection
-against the benign refresh-rotation race is your server's rotation grace
-window (tolerating the just-rotated-out token for a short overlap).
-BroadcastChannel only saves redundant refresh round-trips by letting sibling
-tabs adopt a token a sibling already minted.
+### The multi-tab refresh-rotation footgun
+
+This package's 401→refresh single-flight dedup is **per tab**, not per
+origin. With `bearerAuth` and multiple tabs open against the same session,
+two tabs can each independently observe a `401`, each start their own
+refresh call, and race the server's rotation endpoint. If your auth backend
+runs strict (zero-tolerance) rotation-reuse detection, the loser of that race
+presents a token the server just rotated out and gets classified as **reuse**
+— the server revokes the whole session family, and every tab (winner
+included) gets logged out for what was an entirely benign race, not an
+attack.
+
+There are two independent defenses; use both for a multi-tab `bearerAuth`
+deployment:
+
+1. **Client-side: enable `crossTabRefresh` (this option).** It is a nicety,
+   not a security control by itself — coordinating tabs through
+   `BroadcastChannel` so only one tab refreshes and siblings adopt its token
+   makes the race far less likely to happen in the first place, but it cannot
+   guarantee it never does (a tab can be slow to receive the broadcast, or
+   `BroadcastChannel` can be unavailable).
+2. **Server-side: a rotation grace window.** The authoritative protection is
+   your auth backend tolerating the just-rotated-out token for a short
+   window instead of immediately treating a replay as reuse.
+   [`@andrewpopov/auth-kit`](https://github.com/andrewpopov/auth-kit)'s
+   `rotateRefreshToken` ships this **on by default as of 0.5.0**
+   (`DEFAULT_ROTATION_GRACE_MS`, 30s) specifically to close this footgun —
+   PKG-25 — for consumers who don't (or can't) coordinate refreshes
+   client-side. If your backend uses a different rotation implementation,
+   confirm it has an equivalent grace window; a strict-by-default rotation
+   scheme combined with multi-tab `bearerAuth` and `crossTabRefresh` left off
+   is exactly the combination that triggers this.
+
+**Recommendation:** for any multi-tab `bearerAuth` deployment, turn on
+`crossTabRefresh` here (it eliminates most races before they reach the
+server) and confirm your backend's rotation grace window is enabled (it
+absorbs whatever race remains). Neither alone is sufficient — the client
+control reduces frequency, the server control makes the residual race benign
+instead of a family-wide logout.
 
 - `BroadcastChannel` is same-origin only — no cross-origin leakage risk.
 - Only the short-lived **access token** is ever broadcast, never a refresh
