@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/andrewpopov/fetch-client-kit.git"
+    "url": "git+https://github.com/andrewpopov/fetch-client-kit.git"
   },
   "homepage": "https://github.com/andrewpopov/fetch-client-kit#readme",
   "bugs": {
