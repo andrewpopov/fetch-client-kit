@@ -48,9 +48,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:pack": "node scripts/verify-pack.mjs",
-    "verify": "npm run typecheck && npm test && npm run build && npm run verify:pack"
+    "verify:dist-fresh": "node scripts/verify-dist-fresh.mjs",
+    "verify": "npm run typecheck && npm test && npm run build && npm run verify:pack && npm run verify:dist-fresh",
+    "release:note": "release-kit note",
+    "release:notes": "release-kit notes",
+    "release:bump": "release-kit bump",
+    "release:cut": "release-kit cut",
+    "release:check": "release-kit check",
+    "release:hygiene": "release-kit hygiene"
   },
   "devDependencies": {
+    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.2.0",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
     "vitest": "^4.1.10"
