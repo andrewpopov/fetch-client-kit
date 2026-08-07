@@ -14,8 +14,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const pkgRoot = new URL('..', import.meta.url).pathname;
+const pkgRoot = fileURLToPath(new URL('..', import.meta.url));
 const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'));
 
 function run(cmd, args, opts = {}) {
