@@ -1,0 +1,8 @@
+# Normalize line endings so the repo checks out identically on macOS and Windows.
+#
+# Git for Windows ships with core.autocrlf=true, which rewrites tracked text to
+# CRLF on checkout. This repo tracks dist/ build output, so a Windows clone would
+# otherwise produce artifacts that differ byte-for-byte from the macOS ones.
+# Pinning eol=lf makes the working tree match the index on every platform,
+# regardless of each machine's local git config.
+* text=auto eol=lf
