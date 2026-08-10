@@ -51,11 +51,37 @@ export declare function cookieAuth(config?: {
  *
  * This is a NICETY, NOT A SECURITY CONTROL. The authoritative protection
  * against the benign refresh-rotation race is the server-side grace window
- * that tolerates the old token briefly after rotation. BroadcastChannel just
- * saves redundant refresh calls by letting sibling tabs adopt a token a
- * sibling already minted. It is same-origin only (the browser enforces
- * this) and never carries the refresh token — only the short-lived access
- * token this package already has via `getAccessToken`/`onRefreshed`.
+ * that tolerates the old token briefly after rotation. What follows reduces
+ * how often the race happens; it does not (and — over a channel with no
+ * built-in election, per `postMessage`, no acks — cannot) eliminate it. It
+ * is same-origin only (the browser enforces this) and never carries the
+ * refresh token — only the short-lived access token this package already
+ * has via `getAccessToken`/`onRefreshed`.
+ *
+ * The protocol, briefly (see `refresh` below for the implementation):
+ *   1. A tab about to call the refresh endpoint first broadcasts
+ *      `{ type: 'refresh-start', id }`, THEN makes the call. Siblings that
+ *      see a start with no matching `refresh-done` yet treat that id as the
+ *      leader and await its outcome instead of starting their own refresh —
+ *      this is the actual dedup; the old implementation only broadcast the
+ *      result, after every tab had already fired its own request.
+ *   2. The leader broadcasts `{ type: 'refresh-done', id, success, token? }`
+ *      when its call settles (success OR failure). Followers resolve with
+ *      that outcome; a failed leader is reported as a failure, never
+ *      silently treated as success.
+ *   3. A follower does not wait forever: `leaderTimeoutMs` (default 4000)
+ *      bounds the wait, so a leader tab that crashes, closes, or hangs mid-
+ *      refresh does not hang its siblings — they give up on it and refresh
+ *      themselves once the timeout elapses.
+ *   4. Two tabs CAN still both claim leadership — if their 401s are close
+ *      enough together that neither has received the other's `refresh-start`
+ *      before broadcasting its own, both proceed with their own refresh call.
+ *      BroadcastChannel has no election primitive, so this residual race is
+ *      not eliminated; both calls are safe to make (neither hangs, neither
+ *      corrupts state) and the server-side grace window is what makes a
+ *      resulting rotation race benign. This is "at most one refresh in the
+ *      common (staggered) case, correct — no hang, no silent failure — in
+ *      all cases," not a leader-election guarantee.
  */
 export interface CrossTabRefreshOptions {
     /** BroadcastChannel name. Give each app its own so two apps on the same
@@ -66,6 +92,10 @@ export interface CrossTabRefreshOptions {
      * without making its own refresh call. Only ever called with the access
      * token — the refresh token is never broadcast. */
     onTokenReceived: (accessToken: string) => void;
+    /** How long a follower waits for the tab it believes is refreshing before
+     * giving up and refreshing itself. Guards against a leader tab that
+     * crashed, closed, or whose refresh call hangs. Default 4000ms. */
+    leaderTimeoutMs?: number;
 }
 /** `bearerAuth`'s return type, extended with a `close()` to dispose of the
  * BroadcastChannel opened for `crossTabRefresh` (no-op if that option was not
