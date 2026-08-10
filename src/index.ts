@@ -44,10 +44,22 @@ export interface FetchClient {
 }
 
 async function defaultParseError(response: Response): Promise<Error> {
-  const body = (await response
-    .json()
-    .catch(() => ({ error: response.statusText }))) as { error?: string; message?: string };
-  const err = new Error(body.error || body.message || `Request failed (${response.status})`);
+  // The body is untrusted server output: valid JSON can still be `null`, an
+  // array, or a string (e.g. `"null"`, `"[]"`, `'"nope"'` are all parseable),
+  // none of which has `.error`/`.message` to read. Narrow to a plain object
+  // before touching either property, or a literal JSON `null` body throws a
+  // TypeError here that replaces the status-bearing Error this is supposed
+  // to construct — the caller would see an unrelated crash instead of a
+  // rejection carrying `.status`.
+  const parsed: unknown = await response.json().catch(() => undefined);
+  const body: { error?: unknown; message?: unknown } =
+    parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  const message =
+    (typeof body.error === 'string' && body.error) ||
+    (typeof body.message === 'string' && body.message) ||
+    response.statusText ||
+    `Request failed (${response.status})`;
+  const err = new Error(message);
   (err as Error & { status?: number }).status = response.status;
   return err;
 }
@@ -100,9 +112,17 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
   // drift into a bug). Cleared in `finally` so the next 401 after settle starts
   // fresh.
   let inFlightRefresh: Promise<boolean> | null = null;
+  // `onAuthFailure` must fire once per *refresh attempt*, not once per waiter.
+  // N concurrent 401s share the one `inFlightRefresh` promise above, but each
+  // waiter's own `request()` continuation used to run its own `onAuthFailure()`
+  // call after that shared promise settled — 8 concurrent 401s meant 8 calls to
+  // a hook whose job is typically to wipe local state and redirect to login.
+  // Reset alongside `inFlightRefresh` so the next attempt notifies again.
+  let authFailureNotified = false;
 
   function refresh(): Promise<boolean> {
     if (!inFlightRefresh) {
+      authFailureNotified = false;
       inFlightRefresh = auth
         .refresh({ baseUrl, fetcher })
         .catch(() => false)
@@ -130,7 +150,10 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
       const refreshed = await refresh();
       if (refreshed) {
         response = await send(path, options);
-      } else if (onAuthFailure) {
+      } else if (onAuthFailure && !authFailureNotified) {
+        // Guard so concurrent waiters on the same failed refresh notify once
+        // (see `authFailureNotified` above), not once per waiter.
+        authFailureNotified = true;
         // This is an observer hook. A redirect or state-cleanup error must not
         // replace the request error the caller needs to handle.
         try {
@@ -195,11 +218,37 @@ export function cookieAuth(config: {
  *
  * This is a NICETY, NOT A SECURITY CONTROL. The authoritative protection
  * against the benign refresh-rotation race is the server-side grace window
- * that tolerates the old token briefly after rotation. BroadcastChannel just
- * saves redundant refresh calls by letting sibling tabs adopt a token a
- * sibling already minted. It is same-origin only (the browser enforces
- * this) and never carries the refresh token — only the short-lived access
- * token this package already has via `getAccessToken`/`onRefreshed`.
+ * that tolerates the old token briefly after rotation. What follows reduces
+ * how often the race happens; it does not (and — over a channel with no
+ * built-in election, per `postMessage`, no acks — cannot) eliminate it. It
+ * is same-origin only (the browser enforces this) and never carries the
+ * refresh token — only the short-lived access token this package already
+ * has via `getAccessToken`/`onRefreshed`.
+ *
+ * The protocol, briefly (see `refresh` below for the implementation):
+ *   1. A tab about to call the refresh endpoint first broadcasts
+ *      `{ type: 'refresh-start', id }`, THEN makes the call. Siblings that
+ *      see a start with no matching `refresh-done` yet treat that id as the
+ *      leader and await its outcome instead of starting their own refresh —
+ *      this is the actual dedup; the old implementation only broadcast the
+ *      result, after every tab had already fired its own request.
+ *   2. The leader broadcasts `{ type: 'refresh-done', id, success, token? }`
+ *      when its call settles (success OR failure). Followers resolve with
+ *      that outcome; a failed leader is reported as a failure, never
+ *      silently treated as success.
+ *   3. A follower does not wait forever: `leaderTimeoutMs` (default 4000)
+ *      bounds the wait, so a leader tab that crashes, closes, or hangs mid-
+ *      refresh does not hang its siblings — they give up on it and refresh
+ *      themselves once the timeout elapses.
+ *   4. Two tabs CAN still both claim leadership — if their 401s are close
+ *      enough together that neither has received the other's `refresh-start`
+ *      before broadcasting its own, both proceed with their own refresh call.
+ *      BroadcastChannel has no election primitive, so this residual race is
+ *      not eliminated; both calls are safe to make (neither hangs, neither
+ *      corrupts state) and the server-side grace window is what makes a
+ *      resulting rotation race benign. This is "at most one refresh in the
+ *      common (staggered) case, correct — no hang, no silent failure — in
+ *      all cases," not a leader-election guarantee.
  */
 export interface CrossTabRefreshOptions {
   /** BroadcastChannel name. Give each app its own so two apps on the same
@@ -210,6 +259,10 @@ export interface CrossTabRefreshOptions {
    * without making its own refresh call. Only ever called with the access
    * token — the refresh token is never broadcast. */
   onTokenReceived: (accessToken: string) => void;
+  /** How long a follower waits for the tab it believes is refreshing before
+   * giving up and refreshing itself. Guards against a leader tab that
+   * crashed, closed, or whose refresh call hangs. Default 4000ms. */
+  leaderTimeoutMs?: number;
 }
 
 /** `bearerAuth`'s return type, extended with a `close()` to dispose of the
@@ -218,6 +271,20 @@ export interface CrossTabRefreshOptions {
 export interface BearerAuthStrategy extends AuthStrategy {
   close(): void;
 }
+
+const DEFAULT_LEADER_TIMEOUT_MS = 4000;
+
+interface RefreshStartMessage {
+  type: 'refresh-start';
+  id: string;
+}
+interface RefreshDoneMessage {
+  type: 'refresh-done';
+  id: string;
+  success: boolean;
+  token?: string;
+}
+type CrossTabMessage = RefreshStartMessage | RefreshDoneMessage;
 
 /** Bearer-token auth: read the access token from a store, add an
  * Authorization header, and refresh by exchanging the refresh token. The token
@@ -237,18 +304,91 @@ export function bearerAuth(config: {
     config;
 
   // Degrade silently when BroadcastChannel is unavailable (SSR, old
-  // browsers): channel stays null, and every use below is optional-chained.
+  // browsers): channel stays null, and `refresh` below skips the whole
+  // coordination protocol whenever it is — single-tab behaviour is exactly
+  // the un-coordinated path unconditionally.
   const channel =
     crossTabRefresh && typeof BroadcastChannel !== 'undefined'
       ? new BroadcastChannel(crossTabRefresh.channelName)
       : null;
 
+  // Local (per-tab) view of coordination state — never shared except via the
+  // messages below.
+  let myLeaderId: string | null = null; // set while THIS tab is leading a refresh
+  let activeLeaderId: string | null = null; // the peer id this tab is currently following, if any
+  const leaderWaiters = new Map<string, Array<(result: { success: boolean; token?: string } | null) => void>>();
+
+  function settleLeader(id: string, result: { success: boolean; token?: string } | null) {
+    const waiters = leaderWaiters.get(id);
+    if (!waiters) return;
+    leaderWaiters.delete(id);
+    for (const resolve of waiters) resolve(result);
+  }
+
+  // Resolves with the leader's outcome, or `null` if `timeoutMs` elapses
+  // first (leader crashed / closed / hung) — never hangs forever.
+  function followLeader(id: string, timeoutMs: number): Promise<{ success: boolean; token?: string } | null> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const waiters = leaderWaiters.get(id);
+        if (waiters) {
+          const i = waiters.indexOf(settle);
+          if (i >= 0) waiters.splice(i, 1);
+          if (waiters.length === 0) leaderWaiters.delete(id);
+        }
+        resolve(null);
+      }, timeoutMs);
+      function settle(result: { success: boolean; token?: string } | null) {
+        clearTimeout(timer);
+        resolve(result);
+      }
+      const waiters = leaderWaiters.get(id) ?? [];
+      waiters.push(settle);
+      leaderWaiters.set(id, waiters);
+    });
+  }
+
   if (channel && crossTabRefresh) {
     channel.onmessage = (event: MessageEvent<unknown>) => {
-      if (typeof event.data === 'string' && event.data.length > 0) {
-        crossTabRefresh.onTokenReceived(event.data);
+      const data = event.data;
+      if (!data || typeof data !== 'object' || !('type' in data)) return;
+      const msg = data as CrossTabMessage;
+      if (msg.type === 'refresh-start') {
+        // First start seen with nobody else currently believed to be leading
+        // wins locally. If we are ourselves already mid-refresh, we do NOT
+        // defer to a later claimant — we already committed to our own call
+        // (the "two tabs claim leadership simultaneously" case: both proceed).
+        if (myLeaderId === null && activeLeaderId === null) {
+          activeLeaderId = msg.id;
+        }
+        return;
+      }
+      if (msg.type === 'refresh-done') {
+        if (activeLeaderId === msg.id) activeLeaderId = null;
+        // Adopt the token unconditionally on success, even if we were not
+        // (or no longer) tracking this id as our leader — this is the
+        // "adopt a token a sibling already minted" path for a tab that
+        // wasn't mid-refresh at all when the broadcast arrived.
+        if (msg.success && msg.token) crossTabRefresh.onTokenReceived(msg.token);
+        settleLeader(msg.id, msg.success ? { success: true, token: msg.token } : { success: false });
       }
     };
+  }
+
+  async function doRefresh(baseUrl: string, fetcher: typeof fetch): Promise<{ success: boolean; token?: string }> {
+    try {
+      const res = await fetcher(`${baseUrl}${refreshPath}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials,
+      });
+      if (!res.ok) return { success: false };
+      const refreshed = await onRefreshed(res);
+      const token = refreshed ? getAccessToken() : null;
+      return { success: refreshed, token: token ?? undefined };
+    } catch {
+      return { success: false };
+    }
   }
 
   return {
@@ -258,24 +398,39 @@ export function bearerAuth(config: {
       return { ...request, credentials, headers };
     },
     async refresh({ baseUrl, fetcher }) {
-      try {
-        const res = await fetcher(`${baseUrl}${refreshPath}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials,
-        });
-        if (!res.ok) return false;
-        const refreshed = await onRefreshed(res);
-        // Broadcast the newly-stored access token (never the refresh token —
-        // this package never has one) so sibling tabs on the same channel can
-        // adopt it instead of each firing their own refresh call.
-        if (refreshed && channel) {
-          const token = getAccessToken();
-          if (token) channel.postMessage(token);
+      if (!channel || !crossTabRefresh) {
+        return (await doRefresh(baseUrl, fetcher)).success;
+      }
+
+      // A sibling appears to already be refreshing — await its outcome
+      // instead of also calling the endpoint. This is the actual dedup:
+      // unlike the plain-token broadcast this replaces, it runs BEFORE this
+      // tab makes any network call, not after every tab already has.
+      if (myLeaderId === null && activeLeaderId !== null) {
+        const leaderId = activeLeaderId;
+        const outcome = await followLeader(leaderId, crossTabRefresh.leaderTimeoutMs ?? DEFAULT_LEADER_TIMEOUT_MS);
+        if (outcome !== null) {
+          return outcome.success;
         }
-        return refreshed;
-      } catch {
-        return false;
+        // Timed out waiting (leader crashed / closed / hung) — fall through
+        // and refresh ourselves rather than hang forever.
+      }
+
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      myLeaderId = id;
+      channel.postMessage({ type: 'refresh-start', id } satisfies RefreshStartMessage);
+      try {
+        const result = await doRefresh(baseUrl, fetcher);
+        channel.postMessage({
+          type: 'refresh-done',
+          id,
+          success: result.success,
+          ...(result.token ? { token: result.token } : {}),
+        } satisfies RefreshDoneMessage);
+        return result.success;
+      } finally {
+        myLeaderId = null;
+        if (activeLeaderId === id) activeLeaderId = null;
       }
     },
     close() {

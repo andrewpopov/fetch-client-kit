@@ -93,6 +93,26 @@ describe('createFetchClient', () => {
     const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher });
     await expect(client.request('/ping')).resolves.toBeUndefined();
   });
+
+  it('a JSON `null` error body does not crash defaultParseError — the promised .status still attaches (PKG-142)', async () => {
+    // `null` is valid JSON. `.json()` resolves with it (no rejection for the
+    // `.catch()` fallback to catch), so the naive `body.error` read throws a
+    // TypeError instead of producing the status-bearing Error this is
+    // supposed to construct.
+    const fetcher = (async () => new Response('null', { status: 401 })) as unknown as typeof fetch;
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher });
+
+    let caught: unknown;
+    try {
+      await client.request('/data');
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(TypeError);
+    expect((caught as Error & { status?: number }).status).toBe(401);
+  });
 });
 
 describe('auth strategies', () => {
@@ -198,7 +218,9 @@ describe('FormData handling (BWK-140)', () => {
 describe('crossTabRefresh (bearerAuth, BWK-142)', () => {
   // Simulates a "tab": its own in-memory token store plus a bearerAuth
   // strategy wired to it.
-  function makeTab(opts: { channelName?: string; onTokenReceived?: (t: string) => void } = {}) {
+  function makeTab(
+    opts: { channelName?: string; onTokenReceived?: (t: string) => void; leaderTimeoutMs?: number } = {},
+  ) {
     const store: { token: string | null } = { token: null };
     const onTokenReceived = opts.onTokenReceived ?? ((t: string) => { store.token = t; });
     const auth = bearerAuth({
@@ -208,7 +230,9 @@ describe('crossTabRefresh (bearerAuth, BWK-142)', () => {
         store.token = body.accessToken;
         return true;
       },
-      ...(opts.channelName ? { crossTabRefresh: { channelName: opts.channelName, onTokenReceived } } : {}),
+      ...(opts.channelName
+        ? { crossTabRefresh: { channelName: opts.channelName, onTokenReceived, leaderTimeoutMs: opts.leaderTimeoutMs } }
+        : {}),
     });
     return { store, auth };
   }
@@ -332,6 +356,211 @@ describe('crossTabRefresh (bearerAuth, BWK-142)', () => {
   });
 });
 
+// A small deferred helper so a fetcher's refresh call can be held open under
+// direct test control, instead of relying on a real setTimeout delay to
+// create overlap.
+function makeDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+describe('crossTabRefresh actually deduplicates concurrent refreshes (PKG-142)', () => {
+  // Simulates a "tab": its own in-memory token store plus a bearerAuth
+  // strategy wired to it. Duplicated from the block above (rather than
+  // reused) because `describe` blocks in this file do not share helpers
+  // across `describe` boundaries.
+  function makeTab(
+    opts: { channelName?: string; onTokenReceived?: (t: string) => void; leaderTimeoutMs?: number } = {},
+  ) {
+    const store: { token: string | null } = { token: null };
+    const onTokenReceived = opts.onTokenReceived ?? ((t: string) => { store.token = t; });
+    const auth = bearerAuth({
+      getAccessToken: () => store.token,
+      onRefreshed: async (res) => {
+        const body = (await res.json()) as { accessToken: string };
+        store.token = body.accessToken;
+        return true;
+      },
+      ...(opts.channelName
+        ? { crossTabRefresh: { channelName: opts.channelName, onTokenReceived, leaderTimeoutMs: opts.leaderTimeoutMs } }
+        : {}),
+    });
+    return { store, auth };
+  }
+
+  function makeTabFetcher(store: { token: string | null }, mintedAccessToken: string) {
+    const calls: string[] = [];
+    const fetcher = (async (url: string) => {
+      calls.push(url);
+      if (url.endsWith('/api/auth/refresh')) {
+        return new Response(JSON.stringify({ accessToken: mintedAccessToken }), { status: 200 });
+      }
+      if (store.token === mintedAccessToken) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+    }) as unknown as typeof fetch;
+    return { fetcher, calls };
+  }
+
+  it('a follower awaits the in-flight leader instead of also calling the refresh endpoint', async () => {
+    const channelName = `pkg-142-dedup-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({ channelName });
+
+    let refreshCalls = 0;
+    const gate = makeDeferred<void>();
+
+    function sharedFetcher(store: { token: string | null }) {
+      return (async (url: string) => {
+        if (url.endsWith('/api/auth/refresh')) {
+          refreshCalls += 1;
+          await gate.promise; // held open so both tabs' 401s can overlap deterministically
+          return new Response(JSON.stringify({ accessToken: 'fresh-token' }), { status: 200 });
+        }
+        if (store.token === 'fresh-token') {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+      }) as unknown as typeof fetch;
+    }
+
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: sharedFetcher(a.store) });
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: sharedFetcher(b.store) });
+
+    // A's 401 makes it the leader; its refresh call is held open on `gate`.
+    const pA = clientA.request<{ ok: boolean }>('/data');
+
+    // Give the leader's `refresh-start` broadcast time to reach B before B's
+    // own 401 fires — a generous real margin, not a race between two timers:
+    // the leader's own refresh is held open indefinitely on `gate`, so there
+    // is no competing deadline this could lose against.
+    await new Promise((r) => setTimeout(r, 20));
+
+    // B's 401 should now see A as the leader and await it WITHOUT calling
+    // the refresh endpoint itself — this is the actual dedup finding 1 asks
+    // for, not just "adopt the token afterwards" (already covered above).
+    const pB = clientB.request<{ ok: boolean }>('/data');
+
+    gate.resolve();
+
+    const [rA, rB] = await Promise.all([pA, pB]);
+    expect(rA).toEqual({ ok: true });
+    expect(rB).toEqual({ ok: true });
+    expect(refreshCalls).toBe(1);
+    expect(b.store.token).toBe('fresh-token');
+
+    a.auth.close();
+    b.auth.close();
+  });
+
+  it('a follower learns the leader refresh FAILED — it rejects, it does not hang or assume success', async () => {
+    const channelName = `pkg-142-leader-fails-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({ channelName });
+
+    let refreshCalls = 0;
+    const gate = makeDeferred<void>();
+
+    function fetcherFor() {
+      return (async (url: string) => {
+        if (url.endsWith('/api/auth/refresh')) {
+          refreshCalls += 1;
+          await gate.promise;
+          return new Response(JSON.stringify({ error: 'refresh denied' }), { status: 401 });
+        }
+        return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+      }) as unknown as typeof fetch;
+    }
+
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fetcherFor() });
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: fetcherFor() });
+
+    const pA = clientA.request('/data');
+    await new Promise((r) => setTimeout(r, 20));
+    const pB = clientB.request('/data');
+
+    gate.resolve();
+
+    const [rA, rB] = await Promise.allSettled([pA, pB]);
+    expect(rA.status).toBe('rejected');
+    expect(rB.status).toBe('rejected'); // follower does not silently succeed
+    expect(refreshCalls).toBe(1); // follower still didn't call the endpoint itself
+
+    a.auth.close();
+    b.auth.close();
+  });
+
+  it('a follower times out on a leader that never completes, and proceeds with its own refresh', async () => {
+    const channelName = `pkg-142-leader-hangs-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({ channelName, leaderTimeoutMs: 30 });
+
+    let aRefreshCalls = 0;
+    const fA = (async (url: string) => {
+      if (url.endsWith('/api/auth/refresh')) {
+        aRefreshCalls += 1;
+        return new Promise<Response>(() => {}); // never settles — a crashed/closed/hung leader tab
+      }
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+    }) as unknown as typeof fetch;
+
+    const fB = makeTabFetcher(b.store, 'b-own-fresh-token');
+
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA });
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: fB.fetcher });
+
+    // A becomes the leader and hangs forever — deliberately not awaited.
+    void clientA.request('/data').catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 10)); // let A's refresh-start reach B
+
+    // B must not hang: leaderTimeoutMs (30ms) elapses, B gives up on A and
+    // refreshes on its own.
+    await expect(clientB.request<{ ok: boolean }>('/data')).resolves.toEqual({ ok: true });
+    expect(fB.calls).toContain('http://x/api/auth/refresh');
+    expect(aRefreshCalls).toBe(1); // A's own (stuck) attempt happened; it just never returns
+
+    a.auth.close();
+    b.auth.close();
+  });
+
+  it('two tabs claiming leadership at the same instant both proceed safely (the documented residual race)', async () => {
+    // No coordination primitive on BroadcastChannel prevents this: if two
+    // tabs' 401s are close enough together that neither has yet received the
+    // other's `refresh-start`, both broadcast their own and both call the
+    // refresh endpoint. The guarantee is "at most one in the common case,
+    // correct — no hang, no crash — in all cases," not race-free election.
+    // Firing both requests back-to-back with no intervening await reproduces
+    // exactly that: BroadcastChannel delivery is asynchronous, so neither tab
+    // has processed the other's broadcast by the time both decide to lead.
+    const channelName = `pkg-142-both-leaders-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({ channelName });
+
+    const fA = makeTabFetcher(a.store, 'a-token');
+    const fB = makeTabFetcher(b.store, 'b-token');
+
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: fA.fetcher });
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: fB.fetcher });
+
+    const pA = clientA.request<{ ok: boolean }>('/data');
+    const pB = clientB.request<{ ok: boolean }>('/data');
+
+    const [rA, rB] = await Promise.all([pA, pB]);
+    expect(rA).toEqual({ ok: true });
+    expect(rB).toEqual({ ok: true });
+    expect(fA.calls).toContain('http://x/api/auth/refresh');
+    expect(fB.calls).toContain('http://x/api/auth/refresh'); // both really called — the residual race, and both stayed safe
+
+    a.auth.close();
+    b.auth.close();
+  });
+});
+
 describe('onAuthFailure (BWK-140)', () => {
   it('fires once when a refresh fails on a retriable 401', async () => {
     const fetcher = (async (url: string) => {
@@ -342,6 +571,24 @@ describe('onAuthFailure (BWK-140)', () => {
     const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher, onAuthFailure });
     await expect(client.request('/data')).rejects.toBeTruthy();
     expect(onAuthFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires exactly ONCE for N concurrent requests that share one failed refresh (PKG-142)', async () => {
+    // 8 concurrent 401s share ONE refresh attempt via the single-flight dedup
+    // (already covered elsewhere) — the bug was that each of the 8 WAITERS on
+    // that one shared promise independently ran its own onAuthFailure() call
+    // once it failed, even though there was only ever one refresh attempt.
+    const f = makeFetch({ refreshSucceeds: false, refreshDelayMs: 10 });
+    const onAuthFailure = vi.fn();
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher: f.fetcher, onAuthFailure });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, i) => client.request(`/data/${i}`)),
+    );
+
+    expect(results.every((r) => r.status === 'rejected')).toBe(true);
+    expect(f.refreshCount()).toBe(1); // still one refresh attempt (the existing single-flight dedup)
+    expect(onAuthFailure).toHaveBeenCalledTimes(1); // ...but the observer hook must also fire only once
   });
 
   it('does not fire when the request succeeds or the refresh succeeds', async () => {
