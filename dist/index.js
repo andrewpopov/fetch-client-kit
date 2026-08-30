@@ -222,9 +222,19 @@ function bearerAuth(config) {
                 // (or no longer) tracking this id as our leader — this is the
                 // "adopt a token a sibling already minted" path for a tab that
                 // wasn't mid-refresh at all when the broadcast arrived.
-                if (msg.success && msg.token)
-                    crossTabRefresh.onTokenReceived(msg.token);
-                settleLeader(msg.id, msg.success ? { success: true, token: msg.token } : { success: false });
+                let adopted = false;
+                if (msg.success && msg.token) {
+                    try {
+                        crossTabRefresh.onTokenReceived(msg.token);
+                        adopted = true;
+                    }
+                    catch {
+                        // A follower cannot safely retry its request with the old token.
+                        // Report refresh failure while still settling it immediately; a
+                        // host token-store error must not trigger a second refresh call.
+                    }
+                }
+                settleLeader(msg.id, adopted ? { success: true, token: msg.token } : { success: false });
             }
         };
     }

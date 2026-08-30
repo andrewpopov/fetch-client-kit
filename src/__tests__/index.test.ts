@@ -494,6 +494,50 @@ describe('crossTabRefresh actually deduplicates concurrent refreshes (PKG-142)',
     b.auth.close();
   });
 
+  it('settles a follower as failed without another refresh when token adoption throws', async () => {
+    const channelName = `pkg-131-adoption-fails-${Math.random()}`;
+    const a = makeTab({ channelName });
+    const b = makeTab({
+      channelName,
+      leaderTimeoutMs: 30,
+      onTokenReceived: () => {
+        throw new Error('token store unavailable');
+      },
+    });
+
+    let refreshCalls = 0;
+    const gate = makeDeferred<void>();
+    function sharedFetcher(store: { token: string | null }) {
+      return (async (url: string) => {
+        if (url.endsWith('/api/auth/refresh')) {
+          refreshCalls += 1;
+          await gate.promise;
+          return new Response(JSON.stringify({ accessToken: 'fresh-token' }), { status: 200 });
+        }
+        if (store.token === 'fresh-token') {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+      }) as unknown as typeof fetch;
+    }
+
+    const clientA = createFetchClient({ baseUrl: 'http://x', auth: a.auth, fetcher: sharedFetcher(a.store) });
+    const clientB = createFetchClient({ baseUrl: 'http://x', auth: b.auth, fetcher: sharedFetcher(b.store) });
+
+    const pA = clientA.request<{ ok: boolean }>('/data');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const pB = clientB.request('/data');
+    gate.resolve();
+
+    await expect(pA).resolves.toEqual({ ok: true });
+    await expect(pB).rejects.toThrow('unauthorized');
+    expect(refreshCalls).toBe(1);
+    expect(b.store.token).toBeNull();
+
+    a.auth.close();
+    b.auth.close();
+  });
+
   it('a follower times out on a leader that never completes, and proceeds with its own refresh', async () => {
     const channelName = `pkg-142-leader-hangs-${Math.random()}`;
     const a = makeTab({ channelName });
