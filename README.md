@@ -9,7 +9,7 @@ dependencies; the browser `fetch` is the only ambient requirement.
 ## Install
 
 ```bash
-npm install github:andrewpopov/fetch-client-kit#v0.3.3
+npm install github:andrewpopov/fetch-client-kit#v0.3.5
 ```
 
 ## Usage
@@ -95,6 +95,11 @@ follower does not wait forever: `leaderTimeoutMs` bounds the wait, so a
 leader tab that crashes, closes, or hangs mid-refresh does not hang its
 siblings — they give up on it and refresh themselves once the timeout
 elapses.
+
+If a follower cannot persist the broadcast access token because
+`onTokenReceived` throws, the follower settles that shared refresh as failed
+immediately. It does not wait for the leader timeout or issue a redundant
+refresh with stale local state.
 
 `BroadcastChannel` has no election primitive, so this is **not** a
 race-free guarantee: if two tabs' `401`s are close enough together that
