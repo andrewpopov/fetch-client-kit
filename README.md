@@ -32,8 +32,9 @@ const user = await api.request<User>('/me');
 Every built-in strategy accepts `refreshPath` (default `'/api/auth/refresh'`)
 and `credentials`; `csrfAuth` also accepts `headerName`. Each adds
 `Content-Type: application/json` unless the caller already set one or the body
-is a `FormData` — the browser must set that header itself to include the
-multipart `boundary=`.
+is self-typed (`FormData`, `Blob`, `ArrayBuffer`, typed arrays,
+`URLSearchParams`, `ReadableStream`) — the browser must set that header itself,
+e.g. to include the multipart `boundary=`.
 
 Caller headers may use any standard `HeadersInit` form: a plain object, tuple
 array, or `Headers` instance. Their values are retained when a strategy adds
@@ -163,7 +164,7 @@ benign instead of a family-wide logout.
 
 ## API
 
-`createFetchClient(options)` returns `{ request, refresh }`.
+`createFetchClient(options)` returns `{ request, upload, refresh }`.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -172,6 +173,7 @@ benign instead of a family-wide logout.
 | `fetcher` | global `fetch` | injected for tests |
 | `authPathPrefixes` | `['/api/auth/']` | paths (matched by prefix) whose `401`s never trigger a refresh — the auth endpoints themselves |
 | `parseError` | reads a JSON `{ error }` body, falls back to status text | turns a non-ok `Response` into the `Error` that `request` rejects with |
+| `uploadTransport` | `xhrUploadTransport()`, or `fetchUploadTransport(fetcher)` without `XMLHttpRequest` | how `upload` sends bytes; see [Uploads](#uploads) |
 | `onAuthFailure` | — | called once when a refresh fails on a retriable `401`, e.g. to clear auth state and redirect to login — once per failed refresh attempt, even when many concurrent `401`s share that one attempt; it is an observer hook, so an exception from it cannot replace the request's own error |
 
 - `request<T>(path, init?)` — resolves with the parsed JSON body. `204` and
@@ -180,8 +182,55 @@ benign instead of a family-wide logout.
   its place — a non-object JSON body like `null` or `[]` falls back to the
   status text / `Request failed (<status>)` instead of crashing on a missing
   `.error`/`.message`).
+- `upload<T>(options)` — send a body through the same `401` → refresh → resend
+  loop, with progress and cancellation; resolves the parsed JSON like `request`.
+  See [Uploads](#uploads).
 - `refresh()` — force a refresh (e.g. on app focus); shares the same
   single-flight promise as the `401` path.
+
+## Uploads
+
+```ts
+const controller = new AbortController();
+const photo = await api.upload<Photo>({
+  path: '/animals/1/photo',
+  method: 'PUT',                       // 'POST' | 'PUT' | 'PATCH'
+  body: file,                          // Blob | FormData | ArrayBuffer | view | URLSearchParams | string
+  headers: { 'Idempotency-Key': key },
+  onProgress: ({ loaded, total }) => {}, // total is undefined when unknown
+  signal: controller.signal,
+  beforeRetry: () => {},               // throw to stop (e.g. the session changed)
+});
+```
+
+`upload` shares `request`'s loop and its single-flight refresh, so an upload
+`401` and a `request` `401` in flight together trigger one refresh. Details:
+
+- **Re-decorated per attempt.** The strategy's `decorate` runs again for the
+  resend from your original input, so the resend carries the refreshed token.
+  The same body object is sent both times. Progress restarts from zero on the
+  resend.
+- **Cancellation.** Every cancellation (a pre-aborted signal, an abort mid-send,
+  an abort while the refresh is pending) rejects with an `AbortError`
+  (`isAbortError(e)`). A custom `signal.reason` is kept as `error.cause`. A
+  cancelled upload never starts a refresh it doesn't need, never resends and
+  never fires `onAuthFailure`; the shared refresh keeps running for other callers.
+- **`beforeRetry`.** Called after a retriable `401`, before the refresh, and
+  again after it settles, before the resend or `onAuthFailure`. If it throws,
+  `upload` rejects with that error unchanged and neither happens for it.
+- **Errors.** A non-2xx response rejects with `parseError`'s Error; a network
+  failure with a `TypeError`; invalid JSON in a 2xx with a `SyntaxError`.
+- **Transport seam.** `uploadTransport` receives `{ url, method, headers,
+  credentials, body, onProgress, signal }` and resolves a `Response` for any
+  status. `xhrUploadTransport()` (the default, resolved per call) reports
+  progress and skips headers browsers forbid, such as `Content-Length`.
+  `fetchUploadTransport()` has no progress. XHR cannot omit credentials on a
+  same-origin request, so with the default transport a strategy that asks for
+  `credentials: 'omit'` goes through fetch, without progress.
+- **Content-Type.** `Blob`, `ArrayBuffer`, typed arrays, `URLSearchParams`,
+  `ReadableStream` and `FormData` bodies get no default `application/json` (the
+  platform types them); this applies to `request` too. String bodies still
+  default to JSON.
 
 ## The single-flight guarantee
 

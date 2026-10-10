@@ -25,12 +25,59 @@ export interface FetchClientOptions {
      * Use it to clear auth state and redirect to login. Never throws the caller's
      * error — the original request still rejects with its own error. */
     onAuthFailure?: () => void;
+    /** How `upload` sends bytes. Defaults to `xhrUploadTransport()` when
+     * `XMLHttpRequest` exists (it reports progress), otherwise
+     * `fetchUploadTransport(fetcher)`. A request whose strategy asks for
+     * `credentials: 'omit'` always goes through fetch by default, because XHR
+     * cannot omit credentials on a same-origin request. An injected transport
+     * is used as given and receives the `credentials` to honour. */
+    uploadTransport?: UploadTransport;
 }
+export interface UploadProgress {
+    loaded: number;
+    /** Undefined when the browser cannot compute the total. */
+    total: number | undefined;
+}
+export type UploadBody = Blob | FormData | ArrayBuffer | ArrayBufferView | URLSearchParams | string;
+export interface UploadOptions {
+    path: string;
+    method: 'POST' | 'PUT' | 'PATCH';
+    body: UploadBody;
+    headers?: HeadersInit;
+    /** Restarts from zero if the upload is resent after a refresh. */
+    onProgress?: (progress: UploadProgress) => void;
+    signal?: AbortSignal;
+    /** Called after a retriable 401, before the refresh and again before the
+     * resend or `onAuthFailure`. Throw to stop: the throw rejects `upload`
+     * unchanged, and neither the resend nor `onAuthFailure` happens for it. */
+    beforeRetry?: () => void;
+}
+export interface UploadSendRequest {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    credentials?: RequestCredentials;
+    body: UploadBody;
+    onProgress?: (progress: UploadProgress) => void;
+    signal?: AbortSignal;
+}
+/** One attempt. Resolves a Response for any HTTP status; rejects with a
+ * TypeError for a network failure or an AbortError when cancelled. Never retries. */
+export type UploadTransport = (request: UploadSendRequest) => Promise<Response>;
 export interface FetchClient {
     request<T>(path: string, options?: RequestInit): Promise<T>;
+    /** Send a body through the same 401 -> refresh -> resend loop as `request`,
+     * with a progress callback and cancellation. */
+    upload<T>(options: UploadOptions): Promise<T>;
     /** Exposed for callers that need to force a refresh (e.g. on app focus). */
     refresh(): Promise<boolean>;
 }
+export declare function isAbortError(error: unknown): boolean;
+/** Uploads over XMLHttpRequest, the only browser API that reports upload
+ * progress. `XMLHttpRequest` is resolved on every call so a later stub is honoured. */
+export declare function xhrUploadTransport(): UploadTransport;
+/** Uploads over fetch: no progress events, but it honours every `credentials` mode. */
+export declare function fetchUploadTransport(fetcher?: typeof fetch): UploadTransport;
 export declare function createFetchClient(options: FetchClientOptions): FetchClient;
 /** Cookie/session auth: send credentials, add JSON headers, and
  * refresh by POSTing to the refresh path. Nothing is attached per-request beyond
