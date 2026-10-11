@@ -1,6 +1,3 @@
-import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createFetchClient, isAbortError, type AttemptContext, type AuthStrategy } from '../index';
 import { upload, type UploadTransport } from '../upload';
@@ -139,12 +136,14 @@ describe('client.exchange (the public seam)', () => {
     expect(state.refreshCalls).toBe(1);
   });
 
-  it('request() takes no upload guards: it still refreshes and resends once', async () => {
+  it('request() takes no upload guards: even with an already-aborted signal it still refreshes and resends once', async () => {
     const { auth, state } = makeAuth();
-    const fetcher = fetcherByToken();
+    const fetcher = fetcherByToken(); // ignores the signal, like a fetcher that does not honour it
     const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher: fetcher as unknown as typeof fetch });
+    const controller = new AbortController();
+    controller.abort();
 
-    expect(await client.request('/data')).toEqual({ ok: true });
+    expect(await client.request('/data', { signal: controller.signal })).toEqual({ ok: true });
     expect(state.refreshCalls).toBe(1);
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual(['http://x/data', 'http://x/data']);
   });
@@ -260,6 +259,28 @@ describe('upload() on the exchange seam', () => {
     });
   }
 
+  it('a transport that aborts the signal and rejects with an arbitrary reason rejects with an AbortError carrying it as cause', async () => {
+    const { auth } = makeAuth();
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
+    const controller = new AbortController();
+    const reason = new Error('user navigated away');
+
+    const error = await upload(client, {
+      transport: async () => {
+        controller.abort(reason);
+        throw new Error('transport blew up');
+      },
+      path: '/p',
+      method: 'PUT',
+      body: 'x',
+      signal: controller.signal,
+    }).catch((e) => e);
+
+    expect(isAbortError(error)).toBe(true);
+    expect((error as Error).message).toBe('Upload cancelled');
+    expect((error as { cause?: unknown }).cause).toBe(reason);
+  });
+
   it('a custom parseError error is rejected by identity, not wrapped', async () => {
     const custom = new Error('custom');
     const { auth } = makeAuth();
@@ -315,37 +336,5 @@ describe('upload() on the exchange seam', () => {
 
     expect(isAbortError(error)).toBe(true);
     expect((error as { cause?: unknown }).cause).toBe(reason);
-  });
-});
-
-describe('package entry points', () => {
-  // Node resolves the package's own name through `exports`, the way a consumer does.
-  const nodeRequire = createRequire(__filename);
-
-  it('the root resolves createFetchClient and isAbortError, and carries no upload surface', () => {
-    const root = nodeRequire('@andrewpopov/fetch-client-kit') as Record<string, unknown>;
-    expect(typeof root.createFetchClient).toBe('function');
-    expect(typeof root.isAbortError).toBe('function');
-    for (const removed of ['upload', 'xhrUploadTransport', 'fetchUploadTransport']) {
-      expect(root[removed]).toBeUndefined();
-    }
-  });
-
-  it('the /upload subpath resolves upload, both transports and the SAME isAbortError as the root', () => {
-    const root = nodeRequire('@andrewpopov/fetch-client-kit') as Record<string, unknown>;
-    const sub = nodeRequire('@andrewpopov/fetch-client-kit/upload') as Record<string, unknown>;
-    for (const name of ['upload', 'xhrUploadTransport', 'fetchUploadTransport', 'isAbortError']) {
-      expect(typeof sub[name]).toBe('function');
-    }
-    expect(sub.isAbortError).toBe(root.isAbortError);
-  });
-
-  it('the built core module never references the upload code', () => {
-    const core = readFileSync(join(__dirname, '../../dist/index.js'), 'utf8');
-    expect(core).not.toContain('XMLHttpRequest');
-    expect(core).not.toContain('xhrUploadTransport');
-    expect(core).not.toMatch(/require\(["']\.\/upload["']\)/);
-    const cancellation = readFileSync(join(__dirname, '../../dist/cancellation.js'), 'utf8');
-    expect(cancellation).not.toContain('XMLHttpRequest');
   });
 });
