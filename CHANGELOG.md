@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- upload(): send a body through the shared 401 -> refresh -> resend loop, with progress, cancellation and a transport seam
+  `createFetchClient(...).upload()` sends a Blob, FormData, buffer, URLSearchParams or string through the same single-flight refresh loop as `request()`. It re-decorates each attempt, reports progress, and rejects every cancellation with a named `AbortError`. `uploadTransport`, `xhrUploadTransport`, `fetchUploadTransport` and `isAbortError` are new exports.
+- Blob, ArrayBuffer, typed array, URLSearchParams and ReadableStream bodies no longer get a forced application/json Content-Type
+  The built-in strategies forced `Content-Type: application/json` on every body except FormData, which corrupts a Blob or buffer upload. Self-typed bodies now keep the platform's own type; string bodies still default to JSON.
+
 ## 0.3.5
 
 - Release tooling upgraded to release-kit v0.3.1, so a feature release is graded as a minor rather than a patch

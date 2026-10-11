@@ -3,7 +3,8 @@
  * Pack the package into a tarball, install it into a throwaway project, and
  * assert that:
  *   1. dist/index.d.ts ships inside the tarball.
- *   2. CommonJS `require()` exposes createFetchClient + cookieAuth.
+ *   2. CommonJS `require()` exposes the public functions (createFetchClient, the auth
+ *      strategies, the upload transports and isAbortError).
  *   3. Native ESM `import { ... }` resolves the same named exports (this is what
  *      catches the "member-expression export" bug where cjs-module-lexer can't
  *      see the names for ESM consumers).
@@ -80,7 +81,7 @@ try {
   // 2. CommonJS require smoke.
   const cjsSmoke = `
     const mod = require('${pkg.name}');
-    const expected = ['createFetchClient', 'cookieAuth', 'bearerAuth', 'csrfAuth'];
+    const expected = ['createFetchClient', 'cookieAuth', 'bearerAuth', 'csrfAuth', 'xhrUploadTransport', 'fetchUploadTransport', 'isAbortError'];
     const missing = expected.filter((n) => typeof mod[n] !== 'function');
     if (missing.length) {
       console.error('CJS missing exports: ' + missing.join(', '));
@@ -97,8 +98,8 @@ try {
 
   // 3. Native ESM import smoke (catches the member-expression export bug).
   const esmSmoke = `
-    import { createFetchClient, cookieAuth, bearerAuth, csrfAuth } from '${pkg.name}';
-    for (const [n, f] of Object.entries({ createFetchClient, cookieAuth, bearerAuth, csrfAuth })) {
+    import { createFetchClient, cookieAuth, bearerAuth, csrfAuth, xhrUploadTransport, fetchUploadTransport, isAbortError } from '${pkg.name}';
+    for (const [n, f] of Object.entries({ createFetchClient, cookieAuth, bearerAuth, csrfAuth, xhrUploadTransport, fetchUploadTransport, isAbortError })) {
       if (typeof f !== 'function') { console.error('ESM missing: ' + n); process.exit(5); }
     }
     console.log('ESM OK');

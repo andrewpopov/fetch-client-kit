@@ -688,3 +688,61 @@ describe('default fetcher is late-bound', () => {
     }
   });
 });
+
+describe('request() compatibility with the shared exchange loop', () => {
+  it('a retry that is also a 401 surfaces that response: one refresh, one resend', async () => {
+    let sends = 0;
+    let refreshes = 0;
+    const fetcher = (async (url: string) => {
+      if (url.endsWith('/api/auth/refresh')) {
+        refreshes += 1;
+        return new Response('{}', { status: 200 });
+      }
+      sends += 1;
+      return new Response(JSON.stringify({ error: `denied ${sends}` }), { status: 401 });
+    }) as unknown as typeof fetch;
+    const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), fetcher });
+
+    await expect(client.request('/data')).rejects.toThrow('denied 2');
+    expect(sends).toBe(2);
+    expect(refreshes).toBe(1);
+  });
+
+  it('custom authPathPrefixes replace the default exclusion, matched by prefix on the relative path', async () => {
+    const f = makeFetch();
+    const client = createFetchClient({
+      baseUrl: 'http://x',
+      auth: cookieAuth(),
+      fetcher: f.fetcher,
+      authPathPrefixes: ['/login/'],
+    });
+
+    await expect(client.request('/login/start')).rejects.toBeTruthy();
+    expect(f.refreshCount()).toBe(0);
+
+    await expect(client.request('/data')).resolves.toBeTruthy();
+    expect(f.refreshCount()).toBe(1);
+  });
+
+  it('failures from request() and upload() on one failed refresh each reject with their own error; onAuthFailure fires once', async () => {
+    const onAuthFailure = vi.fn();
+    const f = makeFetch({ refreshSucceeds: false });
+    const client = createFetchClient({
+      baseUrl: 'http://x',
+      auth: cookieAuth(),
+      fetcher: f.fetcher,
+      onAuthFailure,
+      uploadTransport: async () => new Response('{"error":"upload denied"}', { status: 401 }),
+    });
+
+    const results = await Promise.allSettled([
+      client.request('/data'),
+      client.upload({ path: '/photo', method: 'PUT', body: 'x' }),
+    ]);
+
+    expect((results[0] as PromiseRejectedResult).reason.message).toBe('unauthorized');
+    expect((results[1] as PromiseRejectedResult).reason.message).toBe('upload denied');
+    expect(f.refreshCount()).toBe(1);
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+  });
+});
