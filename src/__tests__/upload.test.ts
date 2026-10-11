@@ -689,6 +689,35 @@ describe('upload: cancel while the response body is being read', () => {
   });
 });
 
+describe('upload: a parse failure after the signal is already aborted', () => {
+  it('rejects with the AbortError and leaves no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      const { auth } = makeAuth();
+      const controller = new AbortController();
+      const client = createFetchClient({
+        baseUrl: 'http://x',
+        auth,
+        // Aborts as the response arrives, so parsing starts on an aborted signal and then fails.
+        uploadTransport: async () => {
+          controller.abort();
+          return new Response('<html>', { status: 200 });
+        },
+      });
+
+      const error = await client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+      await flush();
+
+      expect(isAbortError(error)).toBe(true);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+  });
+});
+
 describe('default upload transport selection', () => {
   it('is late-bound: an XMLHttpRequest stubbed AFTER the client was built is used', async () => {
     const { auth } = makeAuth();

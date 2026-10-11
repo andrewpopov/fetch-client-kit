@@ -96,6 +96,9 @@ function raceAbort(promise, signal) {
         return promise;
     return new Promise((resolve, reject) => {
         const onAbort = () => reject(cancelled(signal.reason));
+        // Always observe `promise`: an already-aborted signal returns below, and
+        // its later rejection would otherwise be an unhandled rejection.
+        promise.catch(() => undefined);
         if (signal.aborted) {
             onAbort();
             return;
