@@ -164,7 +164,7 @@ benign instead of a family-wide logout.
 
 ## API
 
-`createFetchClient(options)` returns `{ request, upload, refresh }`.
+`createFetchClient(options)` returns `{ request, refresh, exchange, parseResponse }`.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -173,7 +173,6 @@ benign instead of a family-wide logout.
 | `fetcher` | global `fetch` | injected for tests |
 | `authPathPrefixes` | `['/api/auth/']` | paths (matched by prefix) whose `401`s never trigger a refresh — the auth endpoints themselves |
 | `parseError` | reads a JSON `{ error }` body, falls back to status text | turns a non-ok `Response` into the `Error` that `request` rejects with |
-| `uploadTransport` | `xhrUploadTransport()`, or `fetchUploadTransport(fetcher)` without `XMLHttpRequest` | how `upload` sends bytes; see [Uploads](#uploads) |
 | `onAuthFailure` | — | called once when a refresh fails on a retriable `401`, e.g. to clear auth state and redirect to login — once per failed refresh attempt, even when many concurrent `401`s share that one attempt; it is an observer hook, so an exception from it cannot replace the request's own error |
 
 - `request<T>(path, init?)` — resolves with the parsed JSON body. `204` and
@@ -182,17 +181,29 @@ benign instead of a family-wide logout.
   its place — a non-object JSON body like `null` or `[]` falls back to the
   status text / `Request failed (<status>)` instead of crashing on a missing
   `.error`/`.message`).
-- `upload<T>(options)` — send a body through the same `401` → refresh → resend
-  loop, with progress and cancellation; resolves the parsed JSON like `request`.
-  See [Uploads](#uploads).
 - `refresh()` — force a refresh (e.g. on app focus); shares the same
   single-flight promise as the `401` path.
+- `exchange(path, attempt, guard?)` — the `401` → refresh → resend loop
+  `request` runs, for transports of your own (`upload` is built on it).
+  `attempt({ url, fetcher, decorate })` runs once and again after a successful
+  refresh; call `decorate(init)` inside it, on your original input, every time.
+  It resolves the raw `Response` and never parses it. `guard` is
+  `{ signal?, beforeRetry? }`. See [Uploads](#uploads).
+- `parseResponse<T>(response)` — the parse `request` applies: a non-ok response
+  rejects with `parseError`'s Error, a 2xx body is parsed as JSON, an empty body
+  is `undefined`.
 
 ## Uploads
 
+Uploads live in a separate subpath, `@andrewpopov/fetch-client-kit/upload`,
+which the root module never loads. A consumer that does not upload carries none
+of the upload code; one that does can `import()` it lazily.
+
 ```ts
+import { upload } from '@andrewpopov/fetch-client-kit/upload';
+
 const controller = new AbortController();
-const photo = await api.upload<Photo>({
+const photo = await upload<Photo>(api, {
   path: '/animals/1/photo',
   method: 'PUT',                       // 'POST' | 'PUT' | 'PATCH'
   body: file,                          // Blob | FormData | ArrayBuffer | view | URLSearchParams | string
@@ -200,10 +211,19 @@ const photo = await api.upload<Photo>({
   onProgress: ({ loaded, total }) => {}, // total is undefined when unknown
   signal: controller.signal,
   beforeRetry: () => {},               // throw to stop (e.g. the session changed)
+  transport: undefined,                // optional UploadTransport, see below
 });
 ```
 
-`upload` shares `request`'s loop and its single-flight refresh, so an upload
+`/upload` also exports `xhrUploadTransport`, `fetchUploadTransport`,
+`isAbortError` (the same function the root exports) and the upload types.
+
+**Removed from v0.4.0.** `client.upload(options)`, the `uploadTransport` client
+option, and the root exports `xhrUploadTransport` and `fetchUploadTransport` are
+gone. Use `upload(client, { ...options, transport })` from `/upload`.
+`isAbortError` stays a root export.
+
+`upload` runs on the client's `exchange`, so it shares `request`'s loop and its single-flight refresh, so an upload
 `401` and a `request` `401` in flight together trigger one refresh. Details:
 
 - **Re-decorated per attempt.** The strategy's `decorate` runs again for the
@@ -218,13 +238,13 @@ const photo = await api.upload<Photo>({
 - **`beforeRetry`.** Called after a retriable `401`, before the refresh, and
   again after it settles, before the resend or `onAuthFailure`. If it throws,
   `upload` rejects with that error unchanged and neither happens for it.
-- **Errors.** A non-2xx response rejects with `parseError`'s Error; a network
+- **Errors.** A non-2xx response rejects with `parseError`'s Error (via `client.parseResponse`); a network
   failure with a `TypeError`; invalid JSON in a 2xx with a `SyntaxError`.
-- **Transport seam.** `uploadTransport` receives `{ url, method, headers,
+- **Transport seam.** The `transport` option receives `{ url, method, headers,
   credentials, body, onProgress, signal }` and resolves a `Response` for any
-  status. `xhrUploadTransport()` (the default, resolved per call) reports
+  status. Without one, `upload` picks per attempt: `xhrUploadTransport()` (resolved per call) reports
   progress and skips headers browsers forbid, such as `Content-Length`.
-  `fetchUploadTransport()` has no progress. XHR cannot omit credentials on a
+  `fetchUploadTransport(client's fetcher)` has no progress. XHR cannot omit credentials on a
   same-origin request, so with the default transport a strategy that asks for
   `credentials: 'omit'` goes through fetch, without progress.
 - **Content-Type.** `Blob`, `ArrayBuffer`, typed arrays, `URLSearchParams`,

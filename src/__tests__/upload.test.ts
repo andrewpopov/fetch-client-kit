@@ -1,14 +1,12 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { createFetchClient, cookieAuth, isAbortError, type AuthStrategy } from '../index';
 import {
-  createFetchClient,
-  cookieAuth,
   fetchUploadTransport,
-  isAbortError,
+  upload,
   xhrUploadTransport,
-  type AuthStrategy,
   type UploadSendRequest,
   type UploadTransport,
-} from '../index';
+} from '../upload';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -70,10 +68,10 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
       return originalRefresh(ctx);
     };
     const { transport, requests } = makeTransport(order);
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const body = blob();
 
-    const result = await client.upload<{ ok: boolean }>({ path: '/photo', method: 'PUT', body });
+    const result = await upload<{ ok: boolean }>(client, { transport, path: '/photo', method: 'PUT', body });
 
     expect(result).toEqual({ ok: true });
     expect(order).toEqual(['upload', 'refresh', 'upload']);
@@ -86,10 +84,10 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
   it('decorates on EVERY attempt: token A first, token B after the refresh, same body', async () => {
     const { auth } = makeAuth();
     const { transport, requests } = makeTransport();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const body = blob();
 
-    await client.upload({ path: '/p', method: 'PUT', body, headers: { 'Idempotency-Key': 'intent-1' } });
+    await upload(client, { transport, path: '/p', method: 'PUT', body, headers: { 'Idempotency-Key': 'intent-1' } });
 
     expect(requests.map((r) => r.headers.authorization)).toEqual(['Bearer A', 'Bearer B']);
     expect(requests.map((r) => r.headers['idempotency-key'])).toEqual(['intent-1', 'intent-1']);
@@ -104,11 +102,11 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
       const fresh = new Headers(init?.headers).get('authorization') === 'Bearer B';
       return fresh ? new Response('{"ok":true}', { status: 200 }) : new Response('{}', { status: 401 });
     }) as unknown as typeof fetch;
-    const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher, });
 
     const pending = Promise.all([
       client.request('/data'),
-      client.upload({ path: '/photo', method: 'PUT', body: blob() }),
+      upload(client, { transport, path: '/photo', method: 'PUT', body: blob() }),
     ]);
     await flush();
     expect(state.refreshCalls).toBe(1);
@@ -123,12 +121,12 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
     const { transport } = makeTransport();
     const fetcher = (async () => new Response('{"error":"unauthorized"}', { status: 401 })) as unknown as typeof fetch;
     const onAuthFailure = vi.fn();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher, uploadTransport: transport, onAuthFailure });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher, onAuthFailure });
 
     const settled = Promise.allSettled([
-      client.upload({ path: '/a', method: 'PUT', body: blob() }),
-      client.upload({ path: '/b', method: 'PUT', body: blob() }),
-      client.upload({ path: '/c', method: 'PUT', body: blob() }),
+      upload(client, { transport, path: '/a', method: 'PUT', body: blob() }),
+      upload(client, { transport, path: '/b', method: 'PUT', body: blob() }),
+      upload(client, { transport, path: '/c', method: 'PUT', body: blob() }),
       client.request('/d'),
     ]);
     await flush();
@@ -143,9 +141,9 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
   it('never refreshes in response to a 401 from an auth path', async () => {
     const { auth, state } = makeAuth();
     const { transport, requests } = makeTransport();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    await expect(client.upload({ path: '/api/auth/avatar', method: 'POST', body: blob() })).rejects.toMatchObject({
+    await expect(upload(client, { transport, path: '/api/auth/avatar', method: 'POST', body: blob() })).rejects.toMatchObject({
       status: 401,
     });
     expect(state.refreshCalls).toBe(0);
@@ -155,9 +153,9 @@ describe('upload: the shared 401 -> refresh -> resend loop', () => {
   it('a second 401 after the resend surfaces as the error: one refresh, one resend', async () => {
     const { auth, state } = makeAuth();
     const transport = vi.fn<UploadTransport>(async () => new Response('{"error":"still no"}', { status: 401 }));
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    await expect(client.upload({ path: '/p', method: 'PUT', body: blob() })).rejects.toThrow('still no');
+    await expect(upload(client, { transport, path: '/p', method: 'PUT', body: blob() })).rejects.toThrow('still no');
     expect(transport).toHaveBeenCalledTimes(2);
     expect(state.refreshCalls).toBe(1);
   });
@@ -167,11 +165,11 @@ describe('upload: cancellation', () => {
   it('★3 a pre-aborted signal rejects with AbortError and never calls the transport', async () => {
     const { auth } = makeAuth();
     const transport = vi.fn<UploadTransport>();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const controller = new AbortController();
     controller.abort();
 
-    const error = await client.upload({ path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+    const error = await upload(client, { transport, path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
 
     expect(isAbortError(error)).toBe(true);
     expect(transport).not.toHaveBeenCalled();
@@ -179,12 +177,12 @@ describe('upload: cancellation', () => {
 
   it('a custom abort reason is kept as `cause` only; the rejection is still a named AbortError', async () => {
     const { auth } = makeAuth();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: vi.fn<UploadTransport>() });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const reason = new Error('user navigated away');
     const controller = new AbortController();
     controller.abort(reason);
 
-    const error = await client.upload({ path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+    const error = await upload(client, { transport: vi.fn<UploadTransport>(), path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
 
     expect(error).not.toBe(reason);
     expect(isAbortError(error)).toBe(true);
@@ -194,11 +192,11 @@ describe('upload: cancellation', () => {
   it('falls back to an Error named AbortError where DOMException does not exist', async () => {
     vi.stubGlobal('DOMException', undefined);
     const { auth } = makeAuth();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: vi.fn<UploadTransport>() });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const controller = new AbortController();
     controller.abort();
 
-    const error = await client.upload({ path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+    const error = await upload(client, { transport: vi.fn<UploadTransport>(), path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).name).toBe('AbortError');
@@ -235,21 +233,20 @@ describe('upload: cancellation', () => {
     const { auth, state } = makeAuth({ gate });
     const { transport, requests } = makeTransport();
     const onAuthFailure = vi.fn();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport, onAuthFailure });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, onAuthFailure });
     let epoch = 1;
     const captured = epoch;
     const stale = new Error('session_changed');
 
-    const pending = client
-      .upload({
-        path: '/p',
-        method: 'PUT',
-        body: blob(),
-        beforeRetry: () => {
-          if (epoch !== captured) throw stale;
-        },
-      })
-      .catch((e) => e);
+    const pending = upload(client, {
+      transport,
+      path: '/p',
+      method: 'PUT',
+      body: blob(),
+      beforeRetry: () => {
+        if (epoch !== captured) throw stale;
+      },
+    }).catch((e) => e);
     await flush();
     expect(state.refreshCalls).toBe(1);
     epoch = 2;
@@ -265,21 +262,20 @@ describe('upload: cancellation', () => {
     const { auth } = makeAuth({ gate });
     const { transport, requests } = makeTransport();
     const onAuthFailure = vi.fn();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport, onAuthFailure });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, onAuthFailure });
     let epoch = 1;
     const captured = epoch;
     const stale = new Error('session_changed');
 
-    const pending = client
-      .upload({
-        path: '/p',
-        method: 'PUT',
-        body: blob(),
-        beforeRetry: () => {
-          if (epoch !== captured) throw stale;
-        },
-      })
-      .catch((e) => e);
+    const pending = upload(client, {
+      transport,
+      path: '/p',
+      method: 'PUT',
+      body: blob(),
+      beforeRetry: () => {
+        if (epoch !== captured) throw stale;
+      },
+    }).catch((e) => e);
     await flush();
     epoch = 2;
     gate.resolve(false);
@@ -292,19 +288,18 @@ describe('upload: cancellation', () => {
   it('beforeRetry throwing BEFORE the refresh stops it: no refresh, no resend, error passes through unchanged', async () => {
     const { auth, state } = makeAuth();
     const { transport, requests } = makeTransport();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const stop = new Error('stop');
 
-    const error = await client
-      .upload({
-        path: '/p',
-        method: 'PUT',
-        body: blob(),
-        beforeRetry: () => {
-          throw stop;
-        },
-      })
-      .catch((e) => e);
+    const error = await upload(client, {
+      transport,
+      path: '/p',
+      method: 'PUT',
+      body: blob(),
+      beforeRetry: () => {
+        throw stop;
+      },
+    }).catch((e) => e);
 
     expect(error).toBe(stop);
     expect(state.refreshCalls).toBe(0);
@@ -317,10 +312,10 @@ describe('upload: cancellation', () => {
       const { auth, state } = makeAuth({ gate });
       const { transport, requests } = makeTransport();
       const onAuthFailure = vi.fn();
-      const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport, onAuthFailure });
+      const client = createFetchClient({ baseUrl: 'http://x', auth, onAuthFailure });
       const controller = new AbortController();
 
-      const pending = client.upload({ path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+      const pending = upload(client, { transport, path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
       await flush();
       expect(state.refreshCalls).toBe(1);
       controller.abort(new Error('custom reason'));
@@ -339,11 +334,11 @@ describe('upload: cancellation', () => {
     const gate = deferred<boolean>();
     const { auth, state } = makeAuth({ gate });
     const { transport, requests } = makeTransport();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
     const controller = new AbortController();
 
-    const dying = client.upload({ path: '/a', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
-    const live = client.upload<{ ok: boolean }>({ path: '/b', method: 'PUT', body: blob() });
+    const dying = upload(client, { transport, path: '/a', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+    const live = upload<{ ok: boolean }>(client, { transport, path: '/b', method: 'PUT', body: blob() });
     await flush();
     controller.abort();
     expect(isAbortError(await dying)).toBe(true);
@@ -360,21 +355,20 @@ describe('upload: cancellation', () => {
     const { auth } = makeAuth({ gate });
     const { transport } = makeTransport();
     const onAuthFailure = vi.fn();
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport, onAuthFailure });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, onAuthFailure });
     let epoch = 1;
     const captured = epoch;
 
-    const stale = client
-      .upload({
-        path: '/a',
-        method: 'PUT',
-        body: blob(),
-        beforeRetry: () => {
-          if (epoch !== captured) throw new Error('session_changed');
-        },
-      })
-      .catch((e) => e);
-    const live = client.upload({ path: '/b', method: 'PUT', body: blob() }).catch((e) => e);
+    const stale = upload(client, {
+      transport,
+      path: '/a',
+      method: 'PUT',
+      body: blob(),
+      beforeRetry: () => {
+        if (epoch !== captured) throw new Error('session_changed');
+      },
+    }).catch((e) => e);
+    const live = upload(client, { transport, path: '/b', method: 'PUT', body: blob() }).catch((e) => e);
     await flush();
     epoch = 2;
     gate.resolve(false);
@@ -390,33 +384,32 @@ describe('upload: results and errors', () => {
     const { auth } = makeAuth();
     const transport: UploadTransport = async () => new Response('teapot', { status: 418 });
     const parseError = async (response: Response) => new Error(`custom ${response.status}`);
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: transport, parseError });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, parseError });
 
-    await expect(client.upload({ path: '/p', method: 'PUT', body: 'x' })).rejects.toThrow('custom 418');
+    await expect(upload(client, { transport, path: '/p', method: 'PUT', body: 'x' })).rejects.toThrow('custom 418');
   });
 
   it('a 204 resolves to undefined and invalid 2xx JSON rejects with a SyntaxError', async () => {
     const { auth } = makeAuth();
     let next: Response = new Response(null, { status: 204 });
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: async () => next });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    expect(await client.upload({ path: '/p', method: 'PUT', body: 'x' })).toBeUndefined();
+    expect(await upload(client, { transport: async () => next, path: '/p', method: 'PUT', body: 'x' })).toBeUndefined();
     next = new Response('<html>', { status: 200 });
-    await expect(client.upload({ path: '/p', method: 'PUT', body: 'x' })).rejects.toBeInstanceOf(SyntaxError);
+    await expect(
+      upload(client, { transport: async () => next, path: '/p', method: 'PUT', body: 'x' }),
+    ).rejects.toBeInstanceOf(SyntaxError);
   });
 
   it('a network failure rejects with the transport TypeError and does not refresh', async () => {
     const { auth, state } = makeAuth();
     const failure = new TypeError('Network request failed');
-    const client = createFetchClient({
-      baseUrl: 'http://x',
-      auth,
-      uploadTransport: async () => {
-        throw failure;
-      },
-    });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
+    const transport: UploadTransport = async () => {
+      throw failure;
+    };
 
-    await expect(client.upload({ path: '/p', method: 'PUT', body: 'x' })).rejects.toBe(failure);
+    await expect(upload(client, { transport, path: '/p', method: 'PUT', body: 'x' })).rejects.toBe(failure);
     expect(state.refreshCalls).toBe(0);
   });
 });
@@ -480,9 +473,10 @@ describe('xhrUploadTransport', () => {
     stubXhr();
     const send = async (credentials: RequestCredentials) => {
       const { auth } = makeAuth({ credentials });
-      const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: xhrUploadTransport() });
+      const client = createFetchClient({ baseUrl: 'http://x', auth });
       const body = blob();
-      const pending = client.upload({
+      const pending = upload(client, {
+        transport: xhrUploadTransport(),
         path: '/photo',
         method: 'PUT',
         body,
@@ -513,7 +507,7 @@ describe('xhrUploadTransport', () => {
     const { auth } = makeAuth({ credentials: 'omit' });
     const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher: fetcher as unknown as typeof fetch });
 
-    await client.upload({ path: '/p', method: 'PUT', body: 'x' });
+    await upload(client, { path: '/p', method: 'PUT', body: 'x' });
 
     expect(FakeXhr.instances).toHaveLength(0);
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -526,7 +520,7 @@ describe('xhrUploadTransport', () => {
       const fetcher = vi.fn();
       const { auth } = makeAuth({ credentials });
       const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher: fetcher as unknown as typeof fetch });
-      const pending = client.upload({ path: '/p', method: 'PUT', body: 'x' });
+      const pending = upload(client, { path: '/p', method: 'PUT', body: 'x' });
       await flush();
       FakeXhr.instances[0]!.respond(200, '{}');
       await pending;
@@ -539,7 +533,7 @@ describe('xhrUploadTransport', () => {
     const { auth } = makeAuth();
     const client = createFetchClient({ baseUrl: 'http://x', auth });
     const onProgress = vi.fn();
-    const pending = client.upload({ path: '/p', method: 'PUT', body: blob(), onProgress });
+    const pending = upload(client, { path: '/p', method: 'PUT', body: blob(), onProgress });
     await flush();
     const xhr = FakeXhr.instances[0]!;
     xhr.upload.onprogress?.({ loaded: 2, total: 10, lengthComputable: true });
@@ -555,12 +549,12 @@ describe('xhrUploadTransport', () => {
     const { auth } = makeAuth();
     const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    const first = client.upload({ path: '/p', method: 'PUT', body: 'x' }).catch((e) => e);
+    const first = upload(client, { path: '/p', method: 'PUT', body: 'x' }).catch((e) => e);
     await flush();
     FakeXhr.instances[0]!.respond(0, '');
     expect(await first).toBeInstanceOf(TypeError);
 
-    const second = client.upload({ path: '/p', method: 'PUT', body: 'x' }).catch((e) => e);
+    const second = upload(client, { path: '/p', method: 'PUT', body: 'x' }).catch((e) => e);
     await flush();
     FakeXhr.instances[1]!.onerror?.();
     expect(await second).toBeInstanceOf(TypeError);
@@ -570,7 +564,7 @@ describe('xhrUploadTransport', () => {
     stubXhr();
     const { auth } = makeAuth();
     const client = createFetchClient({ baseUrl: 'http://x', auth });
-    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x' });
+    const pending = upload(client, { path: '/p', method: 'PUT', body: 'x' });
     await flush();
     FakeXhr.instances[0]!.respond(204, '');
     expect(await pending).toBeUndefined();
@@ -582,7 +576,7 @@ describe('xhrUploadTransport', () => {
     const client = createFetchClient({ baseUrl: 'http://x', auth });
     const controller = new AbortController();
 
-    const pending = client.upload({ path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
+    const pending = upload(client, { path: '/p', method: 'PUT', body: blob(), signal: controller.signal }).catch((e) => e);
     await flush();
     controller.abort(new Error('custom'));
     const error = await pending;
@@ -592,7 +586,7 @@ describe('xhrUploadTransport', () => {
 
     // A signal that aborts AFTER a normal completion must not touch the finished XHR.
     const second = new AbortController();
-    const done = client.upload({ path: '/p', method: 'PUT', body: blob(), signal: second.signal });
+    const done = upload(client, { path: '/p', method: 'PUT', body: blob(), signal: second.signal });
     await flush();
     const xhr = FakeXhr.instances[1]!;
     xhr.respond(200, '{}');
@@ -621,9 +615,11 @@ describe('xhrUploadTransport hardening', () => {
   it('an explicitly supplied xhrUploadTransport rejects credentials: omit before constructing an XHR', async () => {
     stubXhr();
     const { auth } = makeAuth({ credentials: 'omit' });
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: xhrUploadTransport() });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    await expect(client.upload({ path: '/p', method: 'PUT', body: 'x' })).rejects.toThrow(/credentials: 'omit'/);
+    await expect(
+      upload(client, { transport: xhrUploadTransport(), path: '/p', method: 'PUT', body: 'x' }),
+    ).rejects.toThrow(/credentials: 'omit'/);
     expect(FakeXhr.instances).toHaveLength(0);
   });
 
@@ -633,7 +629,7 @@ describe('xhrUploadTransport hardening', () => {
     const client = createFetchClient({ baseUrl: 'http://x', auth });
     const controller = new AbortController();
 
-    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+    const pending = upload(client, { path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
     await flush();
     const xhr = FakeXhr.instances[0]!;
     expect(() => xhr.respond(600, '')).not.toThrow();
@@ -658,14 +654,16 @@ describe('upload: cancel while the response body is being read', () => {
     it(`a ${status} aborted mid-body rejects with the normalized AbortError and the custom reason as cause`, async () => {
       const { auth } = makeAuth();
       const controller = new AbortController();
-      const client = createFetchClient({
-        baseUrl: 'http://x',
-        auth,
-        uploadTransport: async () => stalledBody(status, controller.signal),
-      });
+      const client = createFetchClient({ baseUrl: 'http://x', auth });
       const reason = new Error('user cancelled');
 
-      const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+      const pending = upload(client, {
+        transport: async () => stalledBody(status, controller.signal),
+        path: '/p',
+        method: 'PUT',
+        body: 'x',
+        signal: controller.signal,
+      }).catch((e) => e);
       await flush();
       controller.abort(reason);
       const error = await pending;
@@ -680,9 +678,15 @@ describe('upload: cancel while the response body is being read', () => {
     const { auth } = makeAuth();
     const controller = new AbortController();
     const hanging = new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 });
-    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: async () => hanging });
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
 
-    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+    const pending = upload(client, {
+      transport: async () => hanging,
+      path: '/p',
+      method: 'PUT',
+      body: 'x',
+      signal: controller.signal,
+    }).catch((e) => e);
     await flush();
     controller.abort();
     expect(isAbortError(await pending)).toBe(true);
@@ -697,17 +701,19 @@ describe('upload: a parse failure after the signal is already aborted', () => {
     try {
       const { auth } = makeAuth();
       const controller = new AbortController();
-      const client = createFetchClient({
-        baseUrl: 'http://x',
-        auth,
+      const client = createFetchClient({ baseUrl: 'http://x', auth });
+
+      const error = await upload(client, {
         // Aborts as the response arrives, so parsing starts on an aborted signal and then fails.
-        uploadTransport: async () => {
+        transport: async () => {
           controller.abort();
           return new Response('<html>', { status: 200 });
         },
-      });
-
-      const error = await client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+        path: '/p',
+        method: 'PUT',
+        body: 'x',
+        signal: controller.signal,
+      }).catch((e) => e);
       await flush();
 
       expect(isAbortError(error)).toBe(true);
@@ -723,7 +729,7 @@ describe('default upload transport selection', () => {
     const { auth } = makeAuth();
     const client = createFetchClient({ baseUrl: 'http://x', auth });
     stubXhr();
-    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x' });
+    const pending = upload(client, { path: '/p', method: 'PUT', body: 'x' });
     await flush();
     expect(FakeXhr.instances).toHaveLength(1);
     FakeXhr.instances[0]!.respond(200, '{}');
@@ -736,7 +742,7 @@ describe('default upload transport selection', () => {
     const { auth } = makeAuth();
     const client = createFetchClient({ baseUrl: 'http://x', auth, fetcher: fetcher as unknown as typeof fetch });
 
-    expect(await client.upload({ path: '/p', method: 'PUT', body: 'x' })).toEqual({ ok: true });
+    expect(await upload(client, { path: '/p', method: 'PUT', body: 'x' })).toEqual({ ok: true });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
@@ -761,8 +767,8 @@ describe('Content-Type is not forced onto self-typed bodies (request and upload)
 
     it(`upload() leaves Content-Type unset for a ${name} body`, async () => {
       const transport = vi.fn<UploadTransport>(async () => new Response('{}', { status: 200 }));
-      const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), uploadTransport: transport });
-      await client.upload({ path: '/p', method: 'POST', body: make() as never });
+      const client = createFetchClient({ baseUrl: 'http://x', auth: cookieAuth(), });
+      await upload(client, { transport, path: '/p', method: 'POST', body: make() as never });
       expect(transport.mock.calls[0]![0].headers['content-type']).toBeUndefined();
     });
   }
@@ -773,12 +779,11 @@ describe('Content-Type is not forced onto self-typed bodies (request and upload)
     const client = createFetchClient({
       baseUrl: 'http://x',
       auth: cookieAuth(),
-      uploadTransport: transport,
-      fetcher: fetcher as unknown as typeof fetch,
+            fetcher: fetcher as unknown as typeof fetch,
     });
 
-    await client.upload({ path: '/p', method: 'POST', body: '{}' });
-    await client.upload({ path: '/p', method: 'PUT', body: blob(), headers: { 'Content-Type': 'image/jpeg' } });
+    await upload(client, { transport, path: '/p', method: 'POST', body: '{}' });
+    await upload(client, { transport, path: '/p', method: 'PUT', body: blob(), headers: { 'Content-Type': 'image/jpeg' } });
     await client.request('/p', { method: 'POST', body: '{}' });
 
     expect(transport.mock.calls[0]![0].headers['content-type']).toBe('application/json');

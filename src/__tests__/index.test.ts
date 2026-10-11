@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createFetchClient, cookieAuth, bearerAuth, csrfAuth } from '../index';
+import { upload } from '../upload';
 
 // Real BroadcastChannel is used throughout this file (Node >=18 ships a
 // global BroadcastChannel; confirmed present in this repo's Node 24). Where a
@@ -732,12 +733,16 @@ describe('request() compatibility with the shared exchange loop', () => {
       auth: cookieAuth(),
       fetcher: f.fetcher,
       onAuthFailure,
-      uploadTransport: async () => new Response('{"error":"upload denied"}', { status: 401 }),
     });
 
     const results = await Promise.allSettled([
       client.request('/data'),
-      client.upload({ path: '/photo', method: 'PUT', body: 'x' }),
+      upload(client, {
+        transport: async () => new Response('{"error":"upload denied"}', { status: 401 }),
+        path: '/photo',
+        method: 'PUT',
+        body: 'x',
+      }),
     ]);
 
     expect((results[0] as PromiseRejectedResult).reason.message).toBe('unauthorized');
