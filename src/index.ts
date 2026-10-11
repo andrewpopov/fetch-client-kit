@@ -6,6 +6,10 @@
 // only in how auth attaches to a request (cookie, bearer, csrf header); that is
 // the one pluggable seam, an AuthStrategy.
 
+import { raceAbort, throwIfAborted } from './cancellation';
+
+export { isAbortError } from './cancellation';
+
 export interface AuthStrategy {
   /** Decorate an outgoing request: add an Authorization header, a CSRF header,
    * set credentials, etc. Returns the RequestInit to actually send. */
@@ -35,58 +39,40 @@ export interface FetchClientOptions {
    * Use it to clear auth state and redirect to login. Never throws the caller's
    * error — the original request still rejects with its own error. */
   onAuthFailure?: () => void;
-  /** How `upload` sends bytes. Defaults to `xhrUploadTransport()` when
-   * `XMLHttpRequest` exists (it reports progress), otherwise
-   * `fetchUploadTransport(fetcher)`. A request whose strategy asks for
-   * `credentials: 'omit'` always goes through fetch by default, because XHR
-   * cannot omit credentials on a same-origin request. An injected transport
-   * is used as given and receives the `credentials` to honour. */
-  uploadTransport?: UploadTransport;
 }
 
-export interface UploadProgress {
-  loaded: number;
-  /** Undefined when the browser cannot compute the total. */
-  total: number | undefined;
+/** What `exchange` hands each attempt. */
+export interface AttemptContext {
+  /** `baseUrl` + the exchange path. */
+  url: string;
+  /** The client's configured fetcher, late-bound like the one `request` uses. */
+  fetcher: typeof fetch;
+  /** Runs the client's `AuthStrategy.decorate`. Call it inside the attempt, on
+   * the original input, every time: the resend must carry refreshed credentials. */
+  decorate(init: RequestInit): RequestInit;
 }
 
-export type UploadBody = Blob | FormData | ArrayBuffer | ArrayBufferView | URLSearchParams | string;
-
-export interface UploadOptions {
-  path: string;
-  method: 'POST' | 'PUT' | 'PATCH';
-  body: UploadBody;
-  headers?: HeadersInit;
-  /** Restarts from zero if the upload is resent after a refresh. */
-  onProgress?: (progress: UploadProgress) => void;
+/** Lets a cancelled or stale caller stop before it refreshes, and again after the
+ * shared (uncancellable) refresh settles, so it never resends or fires
+ * `onAuthFailure` on a dead session. */
+export interface ExchangeGuard {
   signal?: AbortSignal;
-  /** Called after a retriable 401, before the refresh and again before the
-   * resend or `onAuthFailure`. Throw to stop: the throw rejects `upload`
-   * unchanged, and neither the resend nor `onAuthFailure` happens for it. */
+  /** Called after a retriable 401, before the refresh and again before the resend
+   * or `onAuthFailure`. Throw to stop: the throw rejects `exchange` unchanged. */
   beforeRetry?: () => void;
 }
 
-export interface UploadSendRequest {
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  credentials?: RequestCredentials;
-  body: UploadBody;
-  onProgress?: (progress: UploadProgress) => void;
-  signal?: AbortSignal;
-}
-
-/** One attempt. Resolves a Response for any HTTP status; rejects with a
- * TypeError for a network failure or an AbortError when cancelled. Never retries. */
-export type UploadTransport = (request: UploadSendRequest) => Promise<Response>;
-
 export interface FetchClient {
   request<T>(path: string, options?: RequestInit): Promise<T>;
-  /** Send a body through the same 401 -> refresh -> resend loop as `request`,
-   * with a progress callback and cancellation. */
-  upload<T>(options: UploadOptions): Promise<T>;
   /** Exposed for callers that need to force a refresh (e.g. on app focus). */
   refresh(): Promise<boolean>;
+  /** The 401 -> refresh -> resend loop `request` runs, for transports of your own
+   * (see `@andrewpopov/fetch-client-kit/upload`). Resolves the raw Response and
+   * never parses it. `attempt` runs once, and again after a successful refresh. */
+  exchange(path: string, attempt: (context: AttemptContext) => Promise<Response>, guard?: ExchangeGuard): Promise<Response>;
+  /** The parse `request` applies to an `exchange` Response: a non-ok status
+   * rejects with `parseError`'s Error; a 2xx body is parsed as JSON, empty as undefined. */
+  parseResponse<T>(response: Response): Promise<T>;
 }
 
 async function defaultParseError(response: Response): Promise<Error> {
@@ -153,184 +139,6 @@ function withContentType(
   return normalized;
 }
 
-/** The one cancellation error `upload` rejects with, whatever aborted it. */
-function cancelled(cause?: unknown): Error {
-  const message = 'Upload cancelled';
-  let error: Error;
-  if (typeof DOMException === 'function') {
-    error = new DOMException(message, 'AbortError');
-  } else {
-    error = new Error(message);
-    error.name = 'AbortError';
-  }
-  if (cause !== undefined) Object.defineProperty(error, 'cause', { value: cause, configurable: true });
-  return error;
-}
-
-export function isAbortError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw cancelled(signal.reason);
-}
-
-// Rejects as soon as `signal` aborts WITHOUT cancelling `promise`: the refresh is
-// shared single-flight, so a cancelled waiter must not take it from live ones.
-function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return promise;
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(cancelled(signal.reason));
-    // Always observe `promise`: an already-aborted signal returns below, and
-    // its later rejection would otherwise be an unhandled rejection.
-    promise.catch(() => undefined);
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
-
-function toRecord(init: HeadersInit | undefined): Record<string, string> {
-  const record: Record<string, string> = {};
-  new Headers(init).forEach((value, name) => {
-    record[name] = value;
-  });
-  return record;
-}
-
-const FORBIDDEN_XHR_HEADERS = new Set([
-  'accept-charset',
-  'accept-encoding',
-  'connection',
-  'content-length',
-  'cookie',
-  'cookie2',
-  'date',
-  'dnt',
-  'expect',
-  'host',
-  'keep-alive',
-  'origin',
-  'referer',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-  'via',
-]);
-
-function isForbiddenXhrHeader(name: string): boolean {
-  const lower = name.toLowerCase();
-  return (
-    FORBIDDEN_XHR_HEADERS.has(lower) ||
-    lower.startsWith('proxy-') ||
-    lower.startsWith('sec-') ||
-    lower.startsWith('access-control-request-')
-  );
-}
-
-const NULL_BODY_STATUSES = new Set([204, 205, 304]);
-
-/** Uploads over XMLHttpRequest, the only browser API that reports upload
- * progress. `XMLHttpRequest` is resolved on every call so a later stub is honoured. */
-export function xhrUploadTransport(): UploadTransport {
-  return (request) =>
-    new Promise<Response>((resolve, reject) => {
-      const { signal } = request;
-      if (request.credentials === 'omit') {
-        // XHR can only turn credentials off for cross-origin requests, so it cannot honour this.
-        reject(new Error("xhrUploadTransport cannot honour credentials: 'omit'; use fetchUploadTransport"));
-        return;
-      }
-      if (signal?.aborted) {
-        reject(cancelled(signal.reason));
-        return;
-      }
-      const xhr = new XMLHttpRequest();
-      let settled = false;
-      const onSignalAbort = () => {
-        xhr.abort();
-        settle(() => reject(cancelled(signal?.reason)));
-      };
-      function settle(finish: () => void) {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener('abort', onSignalAbort);
-        finish();
-      }
-
-      try {
-        xhr.open(request.method, request.url);
-        for (const [name, value] of Object.entries(request.headers)) {
-          if (!isForbiddenXhrHeader(name)) xhr.setRequestHeader(name, value);
-        }
-        xhr.withCredentials = request.credentials === 'include';
-        if (request.onProgress) {
-          const onProgress = request.onProgress;
-          xhr.upload.onprogress = (event) =>
-            onProgress({ loaded: event.loaded, total: event.lengthComputable ? event.total : undefined });
-        }
-        xhr.onload = () =>
-          settle(() => {
-            if (xhr.status < 200) {
-              reject(new TypeError('Network request failed'));
-              return;
-            }
-            const headers = new Headers();
-            for (const line of xhr.getAllResponseHeaders().split(/\r?\n/)) {
-              const split = line.indexOf(':');
-              if (split > 0) headers.append(line.slice(0, split).trim(), line.slice(split + 1).trim());
-            }
-            try {
-              resolve(
-                new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
-                  status: xhr.status,
-                  statusText: xhr.statusText,
-                  headers,
-                }),
-              );
-            } catch (error) {
-              reject(error);
-            }
-          });
-        xhr.onerror = () => settle(() => reject(new TypeError('Network request failed')));
-        xhr.onabort = () => settle(() => reject(cancelled(signal?.reason)));
-        signal?.addEventListener('abort', onSignalAbort, { once: true });
-        xhr.send(request.body as XMLHttpRequestBodyInit);
-      } catch (error) {
-        settle(() => reject(error));
-      }
-    });
-}
-
-/** Uploads over fetch: no progress events, but it honours every `credentials` mode. */
-export function fetchUploadTransport(fetcher: typeof fetch = (input, init) => fetch(input, init)): UploadTransport {
-  return async (request) => {
-    throwIfAborted(request.signal);
-    try {
-      return await fetcher(request.url, {
-        method: request.method,
-        headers: request.headers,
-        credentials: request.credentials,
-        body: request.body as BodyInit,
-        signal: request.signal,
-      });
-    } catch (error) {
-      if (request.signal?.aborted) throw cancelled(request.signal.reason);
-      if (isAbortError(error)) throw cancelled(error);
-      throw error;
-    }
-  };
-}
-
-interface RetryGuard {
-  signal?: AbortSignal;
-  beforeRetry?: () => void;
-}
-
 export function createFetchClient(options: FetchClientOptions): FetchClient {
   const {
     baseUrl,
@@ -379,28 +187,31 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
     return !authPathPrefixes.some((prefix) => path.startsWith(prefix));
   }
 
-  async function send(path: string, options: RequestInit): Promise<Response> {
-    return fetcher(`${baseUrl}${path}`, auth.decorate(options));
-  }
-
-  // The 401 -> refresh -> resend loop, shared by `request` and `upload`. `attempt`
-  // re-decorates from the caller's original input each time, so the resend carries
-  // the refreshed credentials. The guard lets a cancelled or stale caller stop
-  // before it refreshes, and again after the (shared, uncancellable) refresh
-  // settles, so it never resends or fires `onAuthFailure` on a dead session.
-  async function exchange(path: string, attempt: () => Promise<Response>, guard?: RetryGuard): Promise<Response> {
+  // The 401 -> refresh -> resend loop, shared by `request` and any transport
+  // built on `exchange`. `attempt` re-decorates from the caller's original input
+  // each time, so the resend carries the refreshed credentials.
+  async function exchange(
+    path: string,
+    attempt: (context: AttemptContext) => Promise<Response>,
+    guard?: ExchangeGuard,
+  ): Promise<Response> {
+    const context: AttemptContext = {
+      url: `${baseUrl}${path}`,
+      fetcher,
+      decorate: (init) => auth.decorate(init),
+    };
     const checkGuard = () => {
       throwIfAborted(guard?.signal);
       guard?.beforeRetry?.();
     };
-    let response = await attempt();
+    let response = await attempt(context);
 
     if (shouldRetry(path, response.status)) {
       checkGuard();
       const refreshed = await raceAbort(refresh(), guard?.signal);
       checkGuard();
       if (refreshed) {
-        response = await attempt();
+        response = await attempt(context);
       } else if (onAuthFailure && !authFailureNotified) {
         // Guard so concurrent waiters on the same failed refresh notify once
         // (see `authFailureNotified` above), not once per waiter.
@@ -417,7 +228,7 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
     return response;
   }
 
-  async function parsed<T>(response: Response): Promise<T> {
+  async function parseResponse<T>(response: Response): Promise<T> {
     if (!response.ok) {
       throw await parseError(response);
     }
@@ -428,45 +239,12 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
   }
 
   async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-    return parsed<T>(await exchange(path, () => send(path, options)));
+    return parseResponse<T>(
+      await exchange(path, ({ url, fetcher: send, decorate }) => send(url, decorate(options))),
+    );
   }
 
-  const fetchTransport = fetchUploadTransport(fetcher);
-  const xhrTransport = xhrUploadTransport();
-
-  async function upload<T>(uploadOptions: UploadOptions): Promise<T> {
-    const { path, method, body, headers, onProgress, signal, beforeRetry } = uploadOptions;
-    throwIfAborted(signal);
-
-    async function attempt(): Promise<Response> {
-      const init = auth.decorate({ method, headers, body: body as BodyInit });
-      const transport =
-        options.uploadTransport ??
-        (init.credentials === 'omit' || typeof XMLHttpRequest === 'undefined' ? fetchTransport : xhrTransport);
-      return transport({
-        url: `${baseUrl}${path}`,
-        method,
-        headers: toRecord(init.headers),
-        credentials: init.credentials,
-        body,
-        onProgress,
-        signal,
-      });
-    }
-
-    const response = await exchange(path, attempt, { signal, beforeRetry });
-    // fetch resolves at the headers, so a cancel can still land while the body
-    // is read; `parseError` also swallows body-read failures into a status
-    // error. Whatever surfaces after an abort is the cancellation.
-    try {
-      return await raceAbort(parsed<T>(response), signal);
-    } catch (error) {
-      if (signal?.aborted) throw cancelled(signal.reason);
-      throw error;
-    }
-  }
-
-  return { request, upload, refresh };
+  return { request, refresh, exchange, parseResponse };
 }
 
 // --- Built-in auth strategies -------------------------------------------------

@@ -33,6 +33,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./upload": {
+      "types": "./dist/upload.d.ts",
+      "require": "./dist/upload.js",
+      "default": "./dist/upload.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
