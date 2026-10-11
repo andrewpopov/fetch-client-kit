@@ -144,6 +144,11 @@ const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 function xhrUploadTransport() {
     return (request) => new Promise((resolve, reject) => {
         const { signal } = request;
+        if (request.credentials === 'omit') {
+            // XHR can only turn credentials off for cross-origin requests, so it cannot honour this.
+            reject(new Error("xhrUploadTransport cannot honour credentials: 'omit'; use fetchUploadTransport"));
+            return;
+        }
         if (signal?.aborted) {
             reject(cancelled(signal.reason));
             return;
@@ -183,11 +188,16 @@ function xhrUploadTransport() {
                     if (split > 0)
                         headers.append(line.slice(0, split).trim(), line.slice(split + 1).trim());
                 }
-                resolve(new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
-                    status: xhr.status,
-                    statusText: xhr.statusText,
-                    headers,
-                }));
+                try {
+                    resolve(new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
+                        status: xhr.status,
+                        statusText: xhr.statusText,
+                        headers,
+                    }));
+                }
+                catch (error) {
+                    reject(error);
+                }
             });
             xhr.onerror = () => settle(() => reject(new TypeError('Network request failed')));
             xhr.onabort = () => settle(() => reject(cancelled(signal?.reason)));
@@ -327,7 +337,18 @@ function createFetchClient(options) {
                 signal,
             });
         }
-        return parsed(await exchange(path, attempt, { signal, beforeRetry }));
+        const response = await exchange(path, attempt, { signal, beforeRetry });
+        // fetch resolves at the headers, so a cancel can still land while the body
+        // is read; `parseError` also swallows body-read failures into a status
+        // error. Whatever surfaces after an abort is the cancellation.
+        try {
+            return await raceAbort(parsed(response), signal);
+        }
+        catch (error) {
+            if (signal?.aborted)
+                throw cancelled(signal.reason);
+            throw error;
+        }
     }
     return { request, upload, refresh };
 }

@@ -177,9 +177,9 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 
 // Rejects as soon as `signal` aborts WITHOUT cancelling `promise`: the refresh is
 // shared single-flight, so a cancelled waiter must not take it from live ones.
-function raceAbort(promise: Promise<boolean>, signal: AbortSignal | undefined): Promise<boolean> {
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
-  return new Promise<boolean>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(cancelled(signal.reason));
     if (signal.aborted) {
       onAbort();
@@ -237,6 +237,11 @@ export function xhrUploadTransport(): UploadTransport {
   return (request) =>
     new Promise<Response>((resolve, reject) => {
       const { signal } = request;
+      if (request.credentials === 'omit') {
+        // XHR can only turn credentials off for cross-origin requests, so it cannot honour this.
+        reject(new Error("xhrUploadTransport cannot honour credentials: 'omit'; use fetchUploadTransport"));
+        return;
+      }
       if (signal?.aborted) {
         reject(cancelled(signal.reason));
         return;
@@ -276,13 +281,17 @@ export function xhrUploadTransport(): UploadTransport {
               const split = line.indexOf(':');
               if (split > 0) headers.append(line.slice(0, split).trim(), line.slice(split + 1).trim());
             }
-            resolve(
-              new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
-                status: xhr.status,
-                statusText: xhr.statusText,
-                headers,
-              }),
-            );
+            try {
+              resolve(
+                new Response(NULL_BODY_STATUSES.has(xhr.status) ? null : xhr.responseText, {
+                  status: xhr.status,
+                  statusText: xhr.statusText,
+                  headers,
+                }),
+              );
+            } catch (error) {
+              reject(error);
+            }
           });
         xhr.onerror = () => settle(() => reject(new TypeError('Network request failed')));
         xhr.onabort = () => settle(() => reject(cancelled(signal?.reason)));
@@ -442,7 +451,16 @@ export function createFetchClient(options: FetchClientOptions): FetchClient {
       });
     }
 
-    return parsed<T>(await exchange(path, attempt, { signal, beforeRetry }));
+    const response = await exchange(path, attempt, { signal, beforeRetry });
+    // fetch resolves at the headers, so a cancel can still land while the body
+    // is read; `parseError` also swallows body-read failures into a status
+    // error. Whatever surfaces after an abort is the cancellation.
+    try {
+      return await raceAbort(parsed<T>(response), signal);
+    } catch (error) {
+      if (signal?.aborted) throw cancelled(signal.reason);
+      throw error;
+    }
   }
 
   return { request, upload, refresh };

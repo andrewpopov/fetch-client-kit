@@ -617,6 +617,78 @@ describe('xhrUploadTransport', () => {
   });
 });
 
+describe('xhrUploadTransport hardening', () => {
+  it('an explicitly supplied xhrUploadTransport rejects credentials: omit before constructing an XHR', async () => {
+    stubXhr();
+    const { auth } = makeAuth({ credentials: 'omit' });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: xhrUploadTransport() });
+
+    await expect(client.upload({ path: '/p', method: 'PUT', body: 'x' })).rejects.toThrow(/credentials: 'omit'/);
+    expect(FakeXhr.instances).toHaveLength(0);
+  });
+
+  it('a response that cannot be built (status 600) rejects, and the abort listener is removed', async () => {
+    stubXhr();
+    const { auth } = makeAuth();
+    const client = createFetchClient({ baseUrl: 'http://x', auth });
+    const controller = new AbortController();
+
+    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+    await flush();
+    const xhr = FakeXhr.instances[0]!;
+    expect(() => xhr.respond(600, '')).not.toThrow();
+    expect(await pending).toBeInstanceOf(RangeError);
+    controller.abort();
+    expect(xhr.abortCalls).toBe(0);
+  });
+});
+
+describe('upload: cancel while the response body is being read', () => {
+  // Headers arrive at once; the body never completes until the signal aborts, then errors with its reason.
+  function stalledBody(status: number, signal: AbortSignal): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal.addEventListener('abort', () => controller.error(signal.reason));
+      },
+    });
+    return new Response(stream, { status });
+  }
+
+  for (const status of [200, 500]) {
+    it(`a ${status} aborted mid-body rejects with the normalized AbortError and the custom reason as cause`, async () => {
+      const { auth } = makeAuth();
+      const controller = new AbortController();
+      const client = createFetchClient({
+        baseUrl: 'http://x',
+        auth,
+        uploadTransport: async () => stalledBody(status, controller.signal),
+      });
+      const reason = new Error('user cancelled');
+
+      const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+      await flush();
+      controller.abort(reason);
+      const error = await pending;
+
+      expect(isAbortError(error)).toBe(true);
+      expect((error as { status?: number }).status).toBeUndefined();
+      expect((error as { cause?: unknown }).cause).toBe(reason);
+    });
+  }
+
+  it('an abort during a body read that never errors still rejects promptly', async () => {
+    const { auth } = makeAuth();
+    const controller = new AbortController();
+    const hanging = new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 });
+    const client = createFetchClient({ baseUrl: 'http://x', auth, uploadTransport: async () => hanging });
+
+    const pending = client.upload({ path: '/p', method: 'PUT', body: 'x', signal: controller.signal }).catch((e) => e);
+    await flush();
+    controller.abort();
+    expect(isAbortError(await pending)).toBe(true);
+  });
+});
+
 describe('default upload transport selection', () => {
   it('is late-bound: an XMLHttpRequest stubbed AFTER the client was built is used', async () => {
     const { auth } = makeAuth();
