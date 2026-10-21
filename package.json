@@ -66,7 +66,7 @@
   },
   "devDependencies": {
     "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
-    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.3.1",
+    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.7.0",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
     "vitest": "^4.1.10"
