@@ -48,13 +48,13 @@ if (preStatus.trim()) {
 }
 
 console.log('[verify:dist-fresh] Building...');
-run('npm', ['run', 'build'], { cwd: packageRoot, stdio: 'inherit' });
+run('npm', ['run', 'compile'], { cwd: packageRoot, stdio: 'inherit' });
 
 const postStatus = gitStatus(['dist']);
 if (postStatus.trim()) {
   fail(
     `Committed dist/ is stale; a fresh build produced different output:\n${postStatus}` +
-      'Run `npm run build` and commit dist/ before releasing.',
+      'Run `npm run compile` and commit dist/ before releasing.',
   );
 }
 
