@@ -65,7 +65,7 @@
     "hooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
-    "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
+    "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.37.1",
     "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.7.1",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
