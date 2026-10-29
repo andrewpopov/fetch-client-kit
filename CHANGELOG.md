@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- Installing from git no longer runs a full dependency install: the `prepare` script is gone (run `npm run hooks` once after cloning) and `build` is now `compile`
+  Installing from git no longer runs a full dependency install: the `prepare` script is gone (run `npm run hooks` once after cloning) and `build` is now `compile`.
+- Update shared release notes tooling
+  Refresh the shared release notes package pins and lockfiles. Full release verification and production rollout remain with the next release candidate.
+
 ## 0.5.0
 
 - Upload moves to the @andrewpopov/fetch-client-kit/upload subpath on a public exchange() seam
