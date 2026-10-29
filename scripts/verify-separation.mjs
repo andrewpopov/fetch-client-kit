@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Runs AFTER `npm run build` and reads the freshly built output: the core module
+ * Runs AFTER `npm run compile` and reads the freshly built output: the core module
  * must never reference the upload code, so a consumer that does not upload never
  * loads it.
  */
@@ -15,7 +15,7 @@ function fail(message) {
   process.exit(1);
 }
 
-if (!existsSync(join(dist, 'upload.js'))) fail('dist/upload.js is missing; run `npm run build` first');
+if (!existsSync(join(dist, 'upload.js'))) fail('dist/upload.js is missing; run `npm run compile` first');
 
 const forbidden = [
   ['XMLHttpRequest', /XMLHttpRequest/],

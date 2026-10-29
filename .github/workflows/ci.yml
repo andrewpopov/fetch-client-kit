@@ -26,7 +26,7 @@ jobs:
       - run: npm run verify:pack
       - name: Dist freshness (committed dist/ must match src/)
         run: |
-          npm run build
+          npm run compile
           git diff --exit-code dist
 
   # Non-required forward-compat leg. Kept out of the `test` context name on

@@ -38,7 +38,7 @@ let tarballPath;
 
 try {
   console.log('[verify:pack] Building...');
-  run('npm', ['run', 'build'], { cwd: pkgRoot, stdio: 'inherit' });
+  run('npm', ['run', 'compile'], { cwd: pkgRoot, stdio: 'inherit' });
 
   if (!existsSync(join(pkgRoot, 'dist', 'index.d.ts'))) {
     fail('dist/index.d.ts is missing after build');

@@ -9,6 +9,7 @@ Use the Node version declared in `package.json`, then run:
 
 ```bash
 npm ci
+npm run hooks # once after cloning: enables the pre-push gate
 npm run verify
 npm audit --audit-level=high
 ```
